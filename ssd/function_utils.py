@@ -369,25 +369,27 @@ def make_honesty_dataloaders(
 
 
 ############## USAGE ####################
+##### TODO: MAKE PYTESTS #####
 
-from transformers import AutoTokenizer
 
-# tok = AutoTokenizer.from_pretrained("gpt2")  # or any HF tokenizer
-# train_loader, test_loader = make_honesty_dataloaders(
-#     data_path="honesty.csv",
-#     tokenizer=tok,
-#     user_tag="<|user|>",
-#     assistant_tag="<|assistant|>",
-#     seed=42,
-#     prefixes_per_statement=3,
-#     n_train_pairs=512,
-#     batch_size=16,
-#     max_length=256,
-# )
+# from transformers import AutoTokenizer
 
-for batch in train_loader:
-    # batch["input_ids"]: (B, 2, L)
-    # batch["labels"]: (B,) -> index of the honest option
-    # Feed each option through your model, score them, and apply a 2-way loss.
-    pass
+# # tok = AutoTokenizer.from_pretrained("gpt2")  # or any HF tokenizer
+# # train_loader, test_loader = make_honesty_dataloaders(
+# #     data_path="honesty.csv",
+# #     tokenizer=tok,
+# #     user_tag="<|user|>",
+# #     assistant_tag="<|assistant|>",
+# #     seed=42,
+# #     prefixes_per_statement=3,
+# #     n_train_pairs=512,
+# #     batch_size=16,
+# #     max_length=256,
+# # )
+
+# for batch in train_loader:
+#     # batch["input_ids"]: (B, 2, L)
+#     # batch["labels"]: (B,) -> index of the honest option
+#     # Feed each option through your model, score them, and apply a 2-way loss.
+#     pass
  
