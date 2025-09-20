@@ -1,0 +1,87 @@
+# config.yaml
+# Template configuration file for SSSD Unlearning Script
+
+# -----------------------------------------------------------------
+# Distributed Training Arguments
+# These are often set by the launcher (torchrun)
+# -----------------------------------------------------------------
+distributed_args:
+  local_rank: -1          # Local rank. -1 means let env var (LOCAL_RANK) decide
+  world_size: 1           # Total number of processes. Let env var (WORLD_SIZE) decide
+  dist_backend: "nccl"    # Backend for distributed comms
+  dist_url: "env://"      # URL for init. "env://" is standard
+
+# -----------------------------------------------------------------
+# Model Arguments
+# -----------------------------------------------------------------
+model_args:
+  # Model name from Hugging Face or local path
+  model_name: "mistralai/Mistral-7B-v0.1"
+  # model_name: "gpt2"
+  
+  # Path to save the final unlearned model checkpoint
+  save_path: "unlearned_model_mistral.pth"
+
+# -----------------------------------------------------------------
+# Data Arguments
+# -----------------------------------------------------------------
+data_args:
+  # Path to the dataset (e.g., where honesty_data.json is)
+  data_path: "./data/"
+  
+  # Number of pairs for training (used by build_honesty_pairs)
+  n_train_pairs: 1000
+  
+  # Number of pairs for testing (used by build_honesty_pairs)
+  n_test_pairs: 100
+  
+  # Batch size *per GPU*. Total batch size = batch_size * world_size
+  batch_size: 1
+  
+  # Random seed for data loaders and samplers
+  seed: 42
+
+# -----------------------------------------------------------------
+# Concept/Reading Vector Paths
+# At least one of these must be provided for ConceptLoss
+# -----------------------------------------------------------------
+vector_args:
+  # Path to the .pt file for the concept vector (e.g., honesty vector)
+  concept_vector_path: "./vectors/honesty_concept_vector.pt"
+  
+  # Path to the .pt file for the reading vector (e.g., from a probe)
+  reading_vector_path: null # Set to null or remove if not used
+  # reading_vector_path: "./vectors/honesty_reading_vector.pt"
+
+# -----------------------------------------------------------------
+# SSSD Unlearning Parameters (ParamConfig)
+# -----------------------------------------------------------------
+param_config:
+  # --- Required fields ---
+  
+  # Dampening constant (lambda in some papers)
+  dampening_constant: 0.1
+  
+  # Selection weighting (alpha in some papers)
+  selection_weighting: 0.1
+
+  # --- Optional fields with defaults ---
+  
+  # Lower bound for weight multiplier (default: 1)
+  # This prevents weights from increasing
+  lower_bound: 1
+  
+  # Exponent for the dampening factor (default: 1)
+  exponent: 1
+  
+  # Layer to apply unlearning *up to* (exclusive)
+  # -1 means up to the last layer (e.g., hidden_states[-1])
+  # 0 means only embeddings (no blocks)
+  # 1 means up to block 0 (i.e., modify only block 0)
+  # 10 means up to block 9 (i.e., modify blocks 0-9)
+  # Set to a high number or num_layers to affect all layers
+  min_layer: 20 # For Mistral (32 layers), this targets layers 0-19
+  # max_layer: -1 # This param seems unused in your code, keeping min_layer
+  
+  # Gradient accumulation steps for importance calculation
+  forget_threshold: 4
