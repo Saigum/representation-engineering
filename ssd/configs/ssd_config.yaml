@@ -16,7 +16,8 @@ distributed_args:
 # -----------------------------------------------------------------
 model_args:
   # Model name from Hugging Face or local path
-  model_name: "mistralai/Mistral-7B-v0.1"
+  # model_name: "mistralai/Mistral-7B-v0.1"
+  model_name: "Qwen/Qwen2.5-0.5B-Instruct"
   # model_name: "gpt2"
   
   # Path to save the final unlearned model checkpoint
@@ -27,7 +28,7 @@ model_args:
 # -----------------------------------------------------------------
 data_args:
   # Path to the dataset (e.g., where honesty_data.json is)
-  data_path: "./data/"
+  data_path: "./data/facts/facts_true_false.csv"
   
   # Number of pairs for training (used by build_honesty_pairs)
   n_train_pairs: 1000
@@ -47,10 +48,11 @@ data_args:
 # -----------------------------------------------------------------
 vector_args:
   # Path to the .pt file for the concept vector (e.g., honesty vector)
-  concept_vector_path: "./vectors/honesty_concept_vector.pt"
+  concept_vector_path: null
   
   # Path to the .pt file for the reading vector (e.g., from a probe)
   reading_vector_path: null # Set to null or remove if not used
+  coeff: 1.0 # Coefficient for the reading vector  
   # reading_vector_path: "./vectors/honesty_reading_vector.pt"
 
 # -----------------------------------------------------------------
