@@ -17,7 +17,8 @@ distributed_args:
 model_args:
   # Model name from Hugging Face or local path
   # model_name: "mistralai/Mistral-7B-v0.1"
-  model_name: "Qwen/Qwen2.5-0.5B-Instruct"
+  # model_name: "Qwen/Qwen2.5-0.5B-Instruct"
+  model_name: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
   # model_name: "gpt2"
   
   # Path to save the final unlearned model checkpoint
@@ -28,7 +29,7 @@ model_args:
 # -----------------------------------------------------------------
 data_args:
   # Path to the dataset (e.g., where honesty_data.json is)
-  data_path: "./data/facts/facts_true_false.csv"
+  data_path: "../data/facts/facts_true_false.csv"
   
   # Number of pairs for training (used by build_honesty_pairs)
   n_train_pairs: 1000

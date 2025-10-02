@@ -83,3 +83,6 @@ def primary_emotions_function_dataset(data_dir, user_tag='', assistant_tag='', s
             'train': {'data': emotion_train_data, 'labels': train_labels},
         }
     return formatted_data
+
+def emotions_dataloader(data_dir,user_tag='',assistant_tag='',seed=0):
+    pass

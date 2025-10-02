@@ -14,7 +14,7 @@ import itertools
 import numpy as np
 import yaml # Added for config file parsing
 import argparse # Added for arg parsing
-from function_utils import iter_transformer_blocks, make_honesty_dataloaders, build_honesty_pairs, PairsTextDataset,honesty_function_dataset
+from function_utils import iter_transformer_blocks, make_honesty_dataloaders, build_honesty_pairs, PairsTextDataset,honesty_function_dataset,make_collate_fn
 from torch import Tensor
 from typing import Optional,Union
 from torch.nn import CrossEntropyLoss
@@ -110,18 +110,26 @@ class ParameterPerturber(torch.nn.Module):
             target_layer_index = layer_number
         
         print(f"Targeting layers up to (but not including) index: {target_layer_index} (layer_number arg: {layer_number})")
+        from torch.nn.parallel import DistributedDataParallel as DDP
 
         self.param_names_to_modify = set()
         count = 0
-        for path, i, block in iter_transformer_blocks(self.model.module): # Use .module for DDP
-            if i < target_layer_index:
-                for name, param in block.named_parameters():
-                    full_name = f"{path}.{name}"
+
+        # Unwrap for traversal, but keep track of whether we're in DDP
+        root = self.model.module if isinstance(self.model, DDP) else self.model
+        ddp_prefix = "module." if isinstance(self.model, DDP) else ""
+        for path, i, block in iter_transformer_blocks(root):  # iterate on the unwrapped root
+            if i < target_layer_index:  # "up to but not including" target
+                # Build the prefix to this block (e.g., "module.transformer.h.0")
+                block_prefix = f"{ddp_prefix}{path}.{i}" if path else f"{ddp_prefix}{i}"
+                # Recurse through all params in the block, prepend the block path
+                for name, param in block.named_parameters(recurse=True):
+                    full_name = f"{block_prefix}.{name}"
                     self.param_names_to_modify.add(full_name)
                     count += 1
             
         self.num_params_to_modify = len(self.param_names_to_modify)
-        print(f"Following are param_names to modify: {self.param_names_to_modify}")x``
+        print(f"Following are param_names to modify: {self.param_names_to_modify}")
         print(f"Identified {self.num_params_to_modify} parameters in {target_layer_index} blocks for modification.")
         self.lower_bound = self.paramconfig.get("lower_bound", 1)
         self.exponent = self.paramconfig.get("exponent", 1)
@@ -143,6 +151,7 @@ class ParameterPerturber(torch.nn.Module):
         gradients across the data in the dataloader.
         """
         importances = self.__zero_params__()
+        print(f"Length of ZeroParam at initialization: {len(importances)}")
         if not importances:
             print("Warning: No parameters selected for importance calculation. Returning empty importances.")
             return importances
@@ -155,20 +164,34 @@ class ParameterPerturber(torch.nn.Module):
             for batch_idx, batch in enumerate(dataloader):
                 # self.optimizer.zero_grad(set_to_none=True) # Zero grad inside loop
                 input_ids = batch['input_ids'].to(self.device)
-                
+                attention_mask = batch.get("attention_mask", torch.ones_like(input_ids)).to(self.device)
+                labels = batch["labels"].to(self.device)
                 # Note: DDP handles the all-reduce automatically
                 loss = 0
-                if isinstance(loss_, ConceptLoss):
-                    outputs = self.model(input_ids, output_hidden_states=True)
-                    hidden_states = outputs.hidden_states
-                    selected_hidden_state = hidden_states[self.layer_number]
-                    ## pass in a list of the hidden_states to optimize ove
-                    loss = loss_(selected_hidden_state)
+                emb_layer = self.model.get_input_embeddings()               # nn.Embedding
+                inp_embeds = emb_layer(input_ids)               # (B,S,H)
+                inp_embeds.retain_grad()                               # so we can read .grad later
+                inp_embeds.requires_grad_(True)
                 
-                elif isinstance(loss_, CrossEntropyLoss):
-                    labels = input_ids # Standard causal LM loss
-                    outputs = self.model(input_ids, labels=labels)
-                    loss = outputs.loss
+                if isinstance(loss_, ConceptLoss):
+                    outputs = self.model(inputs_embeds=inp_embeds,
+                                attention_mask=attention_mask,
+                                labels=labels,
+                                output_hidden_states=True,
+                                return_dict=True,
+                                use_cache=False)
+                    loss = loss_(outputs)
+                elif isinstance(loss_, torch.nn.CrossEntropyLoss) or isinstance(loss_, CrossEntropyLoss):
+                    # Build labels for causal LM: copy ids and mask-out padding
+                    labels = input_ids.clone()
+                    labels[attention_mask == 0] = -100
+                    outputs = self.model(inputs_embeds=inp_embeds,
+                                attention_mask=attention_mask,
+                                labels=labels,
+                                output_hidden_states=True,
+                                return_dict=True,
+                                use_cache=False)
+                    loss = outputs.loss  
                 
                 if loss == 0:
                     pbar.update(1)
@@ -194,7 +217,7 @@ class ParameterPerturber(torch.nn.Module):
         num_accumulation_steps = total_batches / accum_steps
         for name, imp in importances.items():
             imp.data /= num_accumulation_steps
-
+        print(f"Length of importance array: {len(importances)}")
         print("Running Nanchecks on importances...")
         print("length of calculated importance ")
         for param,importance in importances.items():
@@ -274,13 +297,9 @@ def forget_retain_signal_tuning(
     
     print("Calculating FORGET importances...")
     forget_importances = pdr.calc_importance(dataloader, loss_=forget_loss, accum_steps=config.forget_threshold)
-    
-    if retain_loss is not None:
-        print("Calculating RETAIN importances...")
-        retain_importances = pdr.calc_importance(dataloader, loss_=retain_loss, accum_steps=config.forget_threshold)
-    else:
-        print("No retain loss. Using zero importances.")
-        retain_importances = pdr.__zero_params__()
+    print("Calculating RETAIN importances...")
+    retain_importances = pdr.calc_importance(dataloader, loss_=retain_loss, accum_steps=config.forget_threshold)
+
     
     
     ## check number of importance elements that are nonzero or extremely small, or  
@@ -496,15 +515,29 @@ def main_worker(local_rank: int, world_size: int, args):
         n_test_pairs=args.n_test_pairs,
     )
     
+    collate_fn = make_collate_fn(
+        tokenizer=tokenizer,
+        max_length=128,
+        return_text=False,
+    )
     train_ds = PairsTextDataset(train_pairs)
     test_ds = PairsTextDataset(test_pairs)
-    
     train_sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=local_rank, shuffle=True, seed=args.seed)
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, sampler=train_sampler, num_workers=4, pin_memory=True)
-    
-    test_sampler = DistributedSampler(test_ds, num_replicas=world_size, rank=local_rank, shuffle=False)
-    test_loader = DataLoader(test_ds, batch_size=args.batch_size, sampler=test_sampler, num_workers=4, pin_memory=True)
-    
+    test_sampler = DistributedSampler(test_ds, num_replicas=world_size, rank=local_rank, shuffle=False) 
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=args.batch_size,
+        shuffle=True,
+        collate_fn=collate_fn,
+        drop_last=False,
+    )
+    test_loader = DataLoader(
+        test_ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        collate_fn=collate_fn,
+        drop_last=False,
+    )    
     print(f"[{local_rank}] Dataloaders created. Train batches: {len(train_loader)}, Test batches: {len(test_loader)}")
 
     ############################################################################
