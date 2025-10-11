@@ -84,6 +84,7 @@ class ParameterPerturber(torch.nn.Module):
         optimizer: torch.optim.Optimizer,
         parameters: ParamConfig,
         layer_number:Union[int,slice]=-1,
+        use_contrast_vector:bool=False
     ):
         '''
         layer number can be an int for a specific layer, or a slice, for the range of layers that it wants to be
@@ -133,6 +134,8 @@ class ParameterPerturber(torch.nn.Module):
         print(f"Identified {self.num_params_to_modify} parameters in {target_layer_index} blocks for modification.")
         self.lower_bound = self.paramconfig.get("lower_bound", 1)
         self.exponent = self.paramconfig.get("exponent", 1)
+        
+        self.use_contrast_vector = use_contrast_vector
 
     def __zero_params__(self):
         # Create zeros only for the parameters we intend to modify
@@ -233,6 +236,7 @@ class ParameterPerturber(torch.nn.Module):
         original_importances and new_importances, following your SSD scheme.
         """
         count = 0
+        param_dict = dict(self.model.named_parameters())
         with torch.no_grad():
             # for (name, p) in self.model.named_parameters():
             print(original_importances.keys())
@@ -241,13 +245,8 @@ class ParameterPerturber(torch.nn.Module):
                 count += 1
                 oimp = original_importances[name]
                 fimp = new_importances[name]
-                
-                # Synapse Selection with parameter alpha
                 oimp_norm = oimp.mul(self.paramconfig["selection_weighting"])
                 locations = torch.where(fimp > oimp_norm)
-
-                # Dampening
-                # Add epsilon to fimp denominator to avoid div by zero
                 fimp_safe = fimp + 1e-12 
                 weight = (
                     (oimp.mul(self.paramconfig["dampening_constant"])).div(fimp_safe)
@@ -259,9 +258,7 @@ class ParameterPerturber(torch.nn.Module):
                 update = weight[locations]
                 min_locs = torch.where(update > self.lower_bound)
                 update[min_locs] = self.lower_bound
-
-                p[locations] = p[locations].mul(update)
-    
+                param_dict[name][locations] = param_dict[name][locations].mul(update)
         print(f"Modified {count} parameter tensors.")
 
 
