@@ -43,22 +43,23 @@ class ConceptLoss(torch.nn.Module):
         super().__init__()
         assert (concept_vector is not None) or (reading_vector is not None), "At least one of concept_vector or reading_vector must be provided."
         self.l_vec = concept_vector if concept_vector is not None else reading_vector
+        print(self.l_vec)
 
     def forward(self, activations: list):
         """
         activations is expected to be a list of activations of the model, and not just one layer
         """
         loss = 0
-        for layer_number in range(len(activations)):
-            act  = activations[layer_number]
-            print(f"Shape of Activation: {activations.shape} ")
-        for layer_number in range(len(activations)):
+        # for layer_number in range(len(activations)):
+        #     act  = activations[layer_number]
+        #     print(f"Shape of Activation: {act.shape} ")
+        for layer_number in range(len(self.l_vec)):
             act = activations[layer_number]
             B, S, D = act.size()
             act = act.view(B * S, D)
             act_norm = torch.nn.functional.normalize(act, p=2, dim=1)
             l_vec_norm = torch.nn.functional.normalize(self.l_vec[layer_number], p=2, dim=0)
-            cos_sim = torch.matmul(act_norm, l_vec_norm)
+            cos_sim = torch.matmul(act_norm, l_vec_norm.T)
             loss = loss + cos_sim.pow(2).mean()
 
         return loss / len(activations)
@@ -163,8 +164,8 @@ class ParameterPerturber(torch.nn.Module):
                     loss = loss_(selected_hidden_state)
 
                 elif isinstance(loss_, CrossEntropyLoss):
-                    labels = input_ids  # Standard causal LM loss
-                    outputs = self.model(pos_input_ids,neg_attention_mask, labels=labels)
+                    labels = pos_input_ids  # Standard causal LM loss
+                    outputs = self.model(pos_input_ids,pos_attention_mask, labels=labels)
                     loss = outputs.loss
 
                 if loss == 0:
@@ -225,7 +226,7 @@ class ParameterPerturber(torch.nn.Module):
                 min_locs = torch.where(update > self.lower_bound)
                 update[min_locs] = self.lower_bound
                 param_dict[name][locations] = param_dict[name][locations].mul(update)
-        print(f"Modified {count} parameter tensors.")
+        print(f"Went through {count} tensors.")
 
 
 def forget_retain_signal_tuning(
@@ -462,7 +463,13 @@ def main():
             ).to(device).half()
 
         layer_ids = list(range(-5, -13, -1))
-        concept_vector = {k: v for k, v in concept_activations.items() if k in layer_ids}
+        idx = 0 
+        concept_vector = {}
+        for k,v in concept_activations.items():
+            if k in layer_ids:
+                concept_vector[idx] = v
+                idx+=1
+        # concept_vector = {k: v for (k, v) in concept_activations.items() if k in layer_ids}
 
         print(f"Reading Vector obtained via REP reader: {concept_vector}")
         print("Generated reading vector using REP reader.")
