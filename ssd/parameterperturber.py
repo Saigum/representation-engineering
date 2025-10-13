@@ -1,22 +1,13 @@
 import os
 import torch
-import torch.distributed as dist
-import torch.multiprocessing as mp
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-import builtins as __builtins__
 import sys
-import copy
-import time
-import itertools
-import numpy as np
-import yaml # Added for config file parsing
-import argparse # Added for arg parsing
-from function_utils import iter_transformer_blocks, make_honesty_dataloaders, build_honesty_pairs, PairsTextDataset,honesty_function_dataset,make_collate_fn
+import yaml
+import argparse
+from function_utils import iter_transformer_blocks, build_honesty_pairs, PairsTextDataset, honesty_function_dataset,make_honesty_dataloaders
 from torch import Tensor
-from typing import Optional,Union
+from typing import Optional, Union
 from torch.nn import CrossEntropyLoss
 from pydantic import BaseModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -29,9 +20,6 @@ repe_pipeline_registry()
 ################################################################################
 
 
-
-
-
 class ParamConfig(BaseModel):
     lower_bound: int = 1
     exponent: int = 1
@@ -39,28 +27,32 @@ class ParamConfig(BaseModel):
     min_layer: int = -1
     max_layer: int = -1
     forget_threshold: int = 1
-    dampening_constant: float # must be passed
-    selection_weighting: float # must be passed
+    dampening_constant: float  # must be passed
+    selection_weighting: float  # must be passed
+
 
 class ConceptLoss(torch.nn.Module):
-    def __init__(self,
-                 concept_vector:Optional[Tensor],
-                 reading_vector:Optional[Tensor],):
-        '''
+    def __init__(
+        self,
+        concept_vector: Optional[Tensor],
+        reading_vector: Optional[Tensor],
+    ):
+        """
         Concept Loss will handle concept_vector and reading vector as a list of activations for all layers/blocks of that model
-        
-        '''
-        super().__init__() # Added super() call
+        """
+        super().__init__()
         assert (concept_vector is not None) or (reading_vector is not None), "At least one of concept_vector or reading_vector must be provided."
         self.l_vec = concept_vector if concept_vector is not None else reading_vector
-    
-    def forward(self,activations:list):
-        '''
-        activations is expected to be a list of activatios of the model, and not just one layer
-        '''
-        # Reshape activations: (B, S, D) -> (B*S, D)
-        loss=0
-        for layer_number in len(activations):
+
+    def forward(self, activations: list):
+        """
+        activations is expected to be a list of activations of the model, and not just one layer
+        """
+        loss = 0
+        for layer_number in range(len(activations)):
+            act  = activations[layer_number]
+            print(f"Shape of Activation: {activations.shape} ")
+        for layer_number in range(len(activations)):
             act = activations[layer_number]
             B, S, D = act.size()
             act = act.view(B * S, D)
@@ -68,10 +60,9 @@ class ConceptLoss(torch.nn.Module):
             l_vec_norm = torch.nn.functional.normalize(self.l_vec[layer_number], p=2, dim=0)
             cos_sim = torch.matmul(act_norm, l_vec_norm)
             loss = loss + cos_sim.pow(2).mean()
-        
-        return loss / len(activations) 
-           
-            
+
+        return loss / len(activations)
+
 
 ################################################################################
 # 1) ParameterPerturber and ssd_tuning logic
@@ -83,60 +74,51 @@ class ParameterPerturber(torch.nn.Module):
         device,
         optimizer: torch.optim.Optimizer,
         parameters: ParamConfig,
-        layer_number:Union[int,slice]=-1,
-        use_contrast_vector:bool=False
+        layer_number: Union[int, slice] = -1,
+        use_contrast_vector: bool = False
     ):
-        '''
-        layer number can be an int for a specific layer, or a slice, for the range of layers that it wants to be
-        '''
+        """
+        layer_number can be an int for a specific layer, or a slice, for the range of layers
+        """
         super(ParameterPerturber, self).__init__()
         self.model = model
         self.device = device
         self.optimizer = optimizer
-        self.paramconfig = parameters  # Store config dict
+        self.paramconfig = parameters
 
         self.layer_number = layer_number
-        
-        ## we only include till the layer_number : layer_number is negative with 0 as the first layer
+
         self.paramset = {}
-        num_blocks = sum(1 for _ in iter_transformer_blocks(self.model.module)) # Use .module for DDP
+        num_blocks = sum(1 for _ in iter_transformer_blocks(self.model))
         print(f"Total model blocks: {num_blocks}")
 
         # Determine the target layer index
-        # layer_number = -1 means the last block, -2 means second to last, etc.
-        # 0 means the first block (index 0)
         if layer_number < 0:
             target_layer_index = num_blocks + layer_number
         else:
             target_layer_index = layer_number
-        
+
         print(f"Targeting layers up to (but not including) index: {target_layer_index} (layer_number arg: {layer_number})")
-        from torch.nn.parallel import DistributedDataParallel as DDP
 
         self.param_names_to_modify = set()
         count = 0
-
-        # Unwrap for traversal, but keep track of whether we're in DDP
-        root = self.model.module if isinstance(self.model, DDP) else self.model
-        ddp_prefix = "module." if isinstance(self.model, DDP) else ""
-        for path, i, block in iter_transformer_blocks(root):  # iterate on the unwrapped root
-            if i < target_layer_index:  # "up to but not including" target
-                # Build the prefix to this block (e.g., "module.transformer.h.0")
-                block_prefix = f"{ddp_prefix}{path}.{i}" if path else f"{ddp_prefix}{i}"
-                # Recurse through all params in the block, prepend the block path
-                for name, param in block.named_parameters(recurse=True):
-                    full_name = f"{block_prefix}.{name}"
+        for path, i, block in iter_transformer_blocks(self.model):
+            if i < target_layer_index:
+                for name, param in block.named_parameters():
+                    full_name = f"{path}.{i}.{name}"
                     self.param_names_to_modify.add(full_name)
                     count += 1
-            
+
         self.num_params_to_modify = len(self.param_names_to_modify)
         print(f"Following are param_names to modify: {self.param_names_to_modify}")
         print(f"Identified {self.num_params_to_modify} parameters in {target_layer_index} blocks for modification.")
-        self.lower_bound = self.paramconfig.get("lower_bound", 1)
-        self.exponent = self.paramconfig.get("exponent", 1)
-        
-        self.use_contrast_vector = use_contrast_vector
+        self.lower_bound = self.paramconfig.lower_bound
+        self.exponent = self.paramconfig.exponent
 
+        self.use_contrast_vector = use_contrast_vector
+        # param_dict = dict(self.model.named_parameters())
+        # print(self.param_names_to_modify)
+        # print(f"ParamDict: {param_dict.keys()}")
     def __zero_params__(self):
         # Create zeros only for the parameters we intend to modify
         return {
@@ -145,57 +127,46 @@ class ParameterPerturber(torch.nn.Module):
             if name in self.param_names_to_modify
         }
 
-    def calc_importance(self,
-                        dataloader: DataLoader,
-                        loss_:torch.nn.Module, ## this can be either concept loss or cross entropy loss(retain)
-                        accum_steps:int=4):
+    def calc_importance(
+        self,
+        dataloader: DataLoader,
+        loss_: torch.nn.Module,
+        accum_steps: int = 4
+    ):
         """
-        Calculates importance for each parameter by accumulating the squared
-        gradients across the data in the dataloader.
+        Calculates importance for each parameter by accumulating the squared gradients.
         """
         importances = self.__zero_params__()
-        print(f"Length of ZeroParam at initialization: {len(importances)}")
         if not importances:
-            print("Warning: No parameters selected for importance calculation. Returning empty importances.")
+            print("Warning: Importance tensor is empty")
+            exit(1)
             return importances
-            
+
         self.model.train()
         batch_counter = 0
         total_batches = len(dataloader)
-        
-        with tqdm(total=total_batches, desc="Calculating Importances", disable=(dist.get_rank() != 0)) as pbar:
+
+        with tqdm(total=total_batches, desc="Calculating Importances") as pbar:
             for batch_idx, batch in enumerate(dataloader):
-                # self.optimizer.zero_grad(set_to_none=True) # Zero grad inside loop
                 input_ids = batch['input_ids'].to(self.device)
-                attention_mask = batch.get("attention_mask", torch.ones_like(input_ids)).to(self.device)
-                labels = batch["labels"].to(self.device)
-                # Note: DDP handles the all-reduce automatically
+                attention_mask = batch['attention_mask'].to(self.device)
+                pos_input_ids = input_ids[:,0]
+                neg_input_ids = input_ids[:,1] 
+                pos_attention_mask = attention_mask[:,0]
+                neg_attention_mask = attention_mask[:,1]
                 loss = 0
-                emb_layer = self.model.get_input_embeddings()               # nn.Embedding
-                inp_embeds = emb_layer(input_ids)               # (B,S,H)
-                inp_embeds.retain_grad()                               # so we can read .grad later
-                inp_embeds.requires_grad_(True)
-                
+                # input_embeddings = self.model.get_input_embeddings()(input_ids)
                 if isinstance(loss_, ConceptLoss):
-                    outputs = self.model(inputs_embeds=inp_embeds,
-                                attention_mask=attention_mask,
-                                labels=labels,
-                                output_hidden_states=True,
-                                return_dict=True,
-                                use_cache=False)
-                    loss = loss_(outputs)
-                elif isinstance(loss_, torch.nn.CrossEntropyLoss) or isinstance(loss_, CrossEntropyLoss):
-                    # Build labels for causal LM: copy ids and mask-out padding
-                    labels = input_ids.clone()
-                    labels[attention_mask == 0] = -100
-                    outputs = self.model(inputs_embeds=inp_embeds,
-                                attention_mask=attention_mask,
-                                labels=labels,
-                                output_hidden_states=True,
-                                return_dict=True,
-                                use_cache=False)
-                    loss = outputs.loss  
-                
+                    outputs = self.model(pos_input_ids,pos_attention_mask, output_hidden_states=True)
+                    hidden_states = outputs.hidden_states
+                    selected_hidden_state = hidden_states[:self.layer_number]
+                    loss = loss_(selected_hidden_state)
+
+                elif isinstance(loss_, CrossEntropyLoss):
+                    labels = input_ids  # Standard causal LM loss
+                    outputs = self.model(pos_input_ids,neg_attention_mask, labels=labels)
+                    loss = outputs.loss
+
                 if loss == 0:
                     pbar.update(1)
                     continue
@@ -206,24 +177,20 @@ class ParameterPerturber(torch.nn.Module):
                 if (batch_idx + 1) % accum_steps == 0 or (batch_idx + 1) == total_batches:
                     for name, p in self.model.named_parameters():
                         if name in importances and p.grad is not None:
-                            # DDP averages gradients, so pow(2) is on the averaged grad
                             importances[name] += p.grad.detach().pow(2)
-                            
+
                     self.optimizer.zero_grad(set_to_none=True)
                     torch.cuda.empty_cache()
 
                 pbar.update(1)
 
         # Average the squared gradients
-        # We accumulated sums of squared *averaged* gradients
-        # We need to average this sum
         num_accumulation_steps = total_batches / accum_steps
         for name, imp in importances.items():
             imp.data /= num_accumulation_steps
-        print(f"Length of importance array: {len(importances)}")
-        print("Running Nanchecks on importances...")
-        print("length of calculated importance ")
-        for param,importance in importances.items():
+
+        print("Running NaN checks on importances...")
+        for param, importance in importances.items():
             if torch.isnan(importance).any():
                 print(f"Warning: NaNs found in importance for param {param}")
             if (importance < 1e-10).all():
@@ -233,26 +200,25 @@ class ParameterPerturber(torch.nn.Module):
     def modify_weight(self, original_importances, new_importances):
         """
         Modifies the model weights based on the difference between
-        original_importances and new_importances, following your SSD scheme.
+        original_importances and new_importances.
         """
         count = 0
         param_dict = dict(self.model.named_parameters())
         with torch.no_grad():
-            # for (name, p) in self.model.named_parameters():
             print(original_importances.keys())
             print(new_importances.keys())
             for name in self.param_names_to_modify:
                 count += 1
                 oimp = original_importances[name]
                 fimp = new_importances[name]
-                oimp_norm = oimp.mul(self.paramconfig["selection_weighting"])
+                oimp_norm = oimp.mul(self.paramconfig.selection_weighting)
                 locations = torch.where(fimp > oimp_norm)
-                fimp_safe = fimp + 1e-12 
+                fimp_safe = fimp + 1e-12
                 weight = (
-                    (oimp.mul(self.paramconfig["dampening_constant"])).div(fimp_safe)
+                    (oimp.mul(self.paramconfig.dampening_constant)).div(fimp_safe)
                 ).pow(self.exponent)
-                
-                if locations[0].numel() == 0: # Check if locations is empty
+
+                if locations[0].numel() == 0:
                     print("No parameters selected for modification in this tensor.")
                     continue
                 update = weight[locations]
@@ -263,65 +229,64 @@ class ParameterPerturber(torch.nn.Module):
 
 
 def forget_retain_signal_tuning(
-    model:torch.nn.Module,
-    dataloader:DataLoader,
-    concept_vector:Optional[Tensor],
-    reading_vector:Optional[Tensor],
-    device:str="cuda",
-    layer_number:int=-1,
-    forget_loss_class:torch.nn.Module=ConceptLoss,
-    retain_loss_class:Optional[torch.nn.Module]=CrossEntropyLoss,
-    config:ParamConfig=ParamConfig(dampening_constant=0.1,selection_weighting=0.1),):
-    '''As oppposed to an explicit forget and retain set, we use a forget and retain signal (ie:loss) over the same dataset'''
+    model: torch.nn.Module,
+    dataloader: DataLoader,
+    concept_vector: Optional[Tensor],
+    reading_vector: Optional[Tensor],
+    device: str = "cuda",
+    layer_number: int = -1,
+    forget_loss_class: torch.nn.Module = ConceptLoss,
+    retain_loss_class: Optional[torch.nn.Module] = CrossEntropyLoss,
+    config: ParamConfig = ParamConfig(dampening_constant=0.1, selection_weighting=0.1),
+):
+    """As opposed to an explicit forget and retain set, we use a forget and retain signal (i.e. loss) over the same dataset"""
 
-    # Ensure vectors are on the correct device *before* passing to loss
-    
+    # Ensure vectors are on the correct device
     if concept_vector is not None:
-        for keys in concept_vector.keys():
-            concept_vector[keys] = concept_vector[keys].to(device=device)        
+        for key in concept_vector.keys():
+            concept_vector[key] = concept_vector[key].to(device=device)
     if reading_vector is not None:
-        for keys in reading_vector.keys():
-            reading_vector[keys] = reading_vector[keys].to(device=device)  
+        for key in reading_vector.keys():
+            reading_vector[key] = reading_vector[key].to(device=device)
 
     forget_loss = forget_loss_class(concept_vector, reading_vector)
     retain_loss = retain_loss_class() if retain_loss_class is not None else None
-    
-    # Pass model.module.parameters() to optimizer if it's a DDP model
+
     params_to_optimize = model.parameters()
-    optimizer = torch.optim.Adam(params_to_optimize, lr=1e-4) # lr doesn't matter for SSD
-    
-    pdr = ParameterPerturber(model, device, optimizer, config.dict(), layer_number)
-    
+    optimizer = torch.optim.Adam(params_to_optimize, lr=1e-4)
+
+    pdr = ParameterPerturber(model, device, optimizer, config, layer_number)
+
     print("Calculating FORGET importances...")
     forget_importances = pdr.calc_importance(dataloader, loss_=forget_loss, accum_steps=config.forget_threshold)
-    print("Calculating RETAIN importances...")
-    retain_importances = pdr.calc_importance(dataloader, loss_=retain_loss, accum_steps=config.forget_threshold)
 
-    
-    
-    ## check number of importance elements that are nonzero or extremely small, or  
-    for param,importance in retain_importances:
+    if retain_loss is not None:
+        print("Calculating RETAIN importances...")
+        retain_importances = pdr.calc_importance(dataloader, loss_=retain_loss, accum_steps=config.forget_threshold)
+    else:
+        print("No retain loss. Using zero importances.")
+        retain_importances = pdr.__zero_params__()
+
+    # Check for NaNs and near-zero values
+    for param, importance in retain_importances.items():
         if torch.isnan(importance).any():
             print(f"Warning: NaNs found in retain importance for param {param}")
         if (importance < 1e-10).all():
             print(f"Warning: All near-zero retain importance for param {param}")
-    for param,importance in forget_importances:
+    for param, importance in forget_importances.items():
         if torch.isnan(importance).any():
             print(f"Warning: NaNs found in forget importance for param {param}")
         if (importance < 1e-10).all():
             print(f"Warning: All near-zero forget importance for param {param}")
-            
+
     print("Modifying weights...")
-    print(retain_importances)
-    print(forget_importances)
     pdr.modify_weight(retain_importances, forget_importances)
     print("Weight modification complete.")
     return model
 
 
-
 ################################################################################
-# 3) The SSSD class -> Signal-based Selective Synaptic Dampening
+# 2) The SSSD class -> Signal-based Selective Synaptic Dampening
 ################################################################################
 class SSSD():
     def __init__(
@@ -335,20 +300,14 @@ class SSSD():
         self.model = model
         self.config = config
         self.device = device
-        # Track times, etc.
         self.save_files = {"train_time_taken": 0.0}
 
     def set_model(self, model):
         self.model = model
         self.model.to(self.device)
-        
-    def unlearn(self, 
-                train_loader, 
-                test_loader, 
-                concept_vector, 
-                reading_vector, 
-                eval_loaders=None):
-        
+
+    def unlearn(self, train_loader, test_loader, concept_vector, reading_vector, eval_loaders=None):
+        import time
         time_start = time.process_time()
         self.best_model = forget_retain_signal_tuning(
             self.model,
@@ -359,33 +318,23 @@ class SSSD():
             layer_number=self.config.min_layer,
             config=self.config
         )
-        
-        #### POSSIBLE POST-PROCESSING: EVALUATE ON TEST SETS, SAVE BEST MODEL, ETC.#####
-        ## TODO: Add evaluation logic here if needed
-        ################################################################################
+
         self.save_files["train_time_taken"] += time.process_time() - time_start
         return self.best_model
-    
+
+
 ################################################################################
-# 3) Distributed main
+# 3) Config parsing (simplified for single GPU)
 ################################################################################
 def parse_args():
     """
-    Parses command-line arguments, reading defaults from a YAML config file
-    if specified.
+    Parses command-line arguments, reading defaults from a YAML config file.
     """
-    
-    ##### TODO: REMOVE THE CLI FORM OF PASSING ARGS, ONLY PASS VIA YAML #####
-     ############################################################################
-    parser = argparse.ArgumentParser(description="Distributed SSSD Unlearning")
-    
-    # This argument points to the config file
+    parser = argparse.ArgumentParser(description="SSSD Unlearning (Single GPU)")
     parser.add_argument("--config", type=str, default=None, help="Path to the YAML configuration file.")
-    
-    # --- Parse config file path ---
-    # We parse known args first to get the config path
+
     config_args, remaining_argv = parser.parse_known_args()
-    
+
     config_data = {}
     if config_args.config:
         print(f"Loading configuration from: {config_args.config}")
@@ -398,17 +347,6 @@ def parse_args():
     else:
         print("No --config file provided. Using command-line args or defaults.")
 
-    # --- Re-create parser to add all arguments ---
-    # Now we add all other arguments.
-    # Their defaults will be set by config_data if it exists.
-    
-    # Distributed args
-    dist_args = config_data.get('distributed_args', {})
-    parser.add_argument("--local_rank", type=int, default=dist_args.get('local_rank', -1), help="Local process rank (usually set by launcher).")
-    parser.add_argument("--world_size", type=int, default=dist_args.get('world_size', 1), help="Number of total processes (usually set by launcher).")
-    parser.add_argument("--dist_backend", type=str, default=dist_args.get('dist_backend', 'nccl'), help="Distributed backend.")
-    parser.add_argument("--dist_url", type=str, default=dist_args.get('dist_url', 'env://'), help="URL for init.")
-
     # Model args
     model_args = config_data.get('model_args', {})
     parser.add_argument("--model_name", type=str, default=model_args.get('model_name', 'gpt2'), help="Model name or path.")
@@ -419,11 +357,8 @@ def parse_args():
     parser.add_argument("--data_path", type=str, default=data_args.get('data_path', './data/'), help="Path to the honesty dataset.")
     parser.add_argument("--n_train_pairs", type=int, default=data_args.get('n_train_pairs', 1000), help="Number of training pairs.")
     parser.add_argument("--n_test_pairs", type=int, default=data_args.get('n_test_pairs', 100), help="Number of test pairs.")
-    parser.add_argument("--batch_size", type=int, default=data_args.get('batch_size', 1), help="Batch size PER GPU.")
-    parser.add_argument("--seed", type=int, default=data_args.get('seed', 42), help="Random seed for data splitting.")
-    # Unlearn config (SSSD)
-    # We pass this as a dictionary
-    # parser.add_argument("--param_config", type=dict, default=config_data.get('param_config', {}), help="Dictionary of ParamConfig settings (loaded from YAML).")
+    parser.add_argument("--batch_size", type=int, default=data_args.get('batch_size', 1), help="Batch size.")
+    parser.add_argument("--seed", type=int, default=data_args.get('seed', 42), help="Random seed.")
 
     # Concept vector paths
     vector_args = config_data.get('vector_args', {})
@@ -431,77 +366,34 @@ def parse_args():
     parser.add_argument("--reading_vector_path", type=str, default=vector_args.get('reading_vector_path', None), help="Path to the reading vector (.pt file).")
     parser.add_argument("--coeff", type=float, default=vector_args.get('coeff', 1.0), help="Coefficient to scale the concept/reading vector.")
 
-    # Now, parse all arguments (including the ones in remaining_argv)
-    # This will correctly override defaults from config_data with any
-    # command-line arguments provided.
     args = parser.parse_args(remaining_argv)
-    args.param_config = None
-    
-    # Manually merge the param_config dict, as argparse doesn't handle
-    # dict defaults perfectly when passed as cmd-line override.
-    # The default loaded from YAML will be used.
-    if not args.param_config:
-         args.param_config = config_data.get('param_config', {})
+    args.param_config = config_data.get('param_config', {})
 
     return args
 
 
-def setup_for_distributed(is_master: bool):
-    """
-    This utility disables tqdm/bar updates for non-master processes to avoid
-    console spam.
-    """
-    if not is_master:
-        # Disable printing entirely on non-master ranks
-        def print_pass(*args, **kwargs):
-            pass
-        __builtins__.print = print_pass
-        
-        # Disable tqdm
-        global tqdm
-        tqdm = lambda *args, **kwargs: args[0] if args else None # Return iterator if exists
+def main():
+    args = parse_args()
 
-
-def main_worker(local_rank: int, world_size: int, args):
-    # 1) Initialize process group
-    dist.init_process_group(
-        backend=args.dist_backend,
-        init_method=args.dist_url,
-        world_size=world_size,
-        rank=local_rank,
-    )
-
-    # 2) Set device
-    torch.cuda.set_device(local_rank)
-    device = torch.device("cuda", local_rank)
-
-    # 3) (Optional) silence logs if not master
-    is_master = (local_rank == 0)
-    setup_for_distributed(is_master)
-    
-    print(f"[{local_rank}] Process started. World size: {world_size}.")
-    print(f"[{local_rank}] Loading model: {args.model_name}")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
 
     ############################################################################
     # Model Setup
     ############################################################################
-    model_name = args.model_name
-    # Load model with float16
-    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, trust_remote_code=True).to(device)
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-        model.config.pad_token_id = model.config.eos_token_id
+    print(f"Loading model: {args.model_name}")
+    model = AutoModelForCausalLM.from_pretrained(args.model_name, torch_dtype=torch.float16, trust_remote_code=True).to(device)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
+    # if tokenizer.pad_token is None:
+    #     tokenizer.pad_token = tokenizer.eos_token
+    #     model.config.pad_token_id = model.config.eos_token_id
 
-    # DDP wrapper
-    ddp_model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
-    print(f"[{local_rank}] Model loaded and wrapped in DDP.")
+    print("Model loaded.")
 
     ############################################################################
-    # Data Setup (Distributed Samplers)
+    # Data Setup (No distributed samplers)
     ############################################################################
-    print(f"[{local_rank}] Setting up datasets...")
-    # These args (user_tag, assistant_tag) should be in your config if needed
+    print("Setting up datasets...")
     train_pairs, test_pairs = build_honesty_pairs(
         data_path=args.data_path,
         tokenizer=tokenizer,
@@ -511,49 +403,37 @@ def main_worker(local_rank: int, world_size: int, args):
         n_train_pairs=args.n_train_pairs,
         n_test_pairs=args.n_test_pairs,
     )
-    
-    collate_fn = make_collate_fn(
-        tokenizer=tokenizer,
-        max_length=128,
-        return_text=False,
-    )
+
     train_ds = PairsTextDataset(train_pairs)
     test_ds = PairsTextDataset(test_pairs)
-    train_sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=local_rank, shuffle=True, seed=args.seed)
-    test_sampler = DistributedSampler(test_ds, num_replicas=world_size, rank=local_rank, shuffle=False) 
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=args.batch_size,
-        shuffle=True,
-        collate_fn=collate_fn,
-        drop_last=False,
-    )
-    test_loader = DataLoader(
-        test_ds,
-        batch_size=args.batch_size,
-        shuffle=False,
-        collate_fn=collate_fn,
-        drop_last=False,
-    )    
-    print(f"[{local_rank}] Dataloaders created. Train batches: {len(train_loader)}, Test batches: {len(test_loader)}")
+
+    # train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0, pin_memory=True)
+    # test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=True)
+    train_loader,test_loader = make_honesty_dataloaders(data_path=args.data_path,
+                                                        tokenizer=tokenizer,user_tag="USER:",
+                                                        assistant_tag="ASSISTANT:",
+                                                        seed=args.seed,n_train_pairs=args.n_train_pairs,    
+                                                        n_test_pairs=args.n_test_pairs,batch_size=args.batch_size)
+    
+    print(f"Dataloaders created. Train batches: {len(train_loader)}, Test batches: {len(test_loader)}")
 
     ############################################################################
     # Load Concept/Reading Vectors
     ############################################################################
     concept_vector = None
     if args.concept_vector_path:
-        print(f"[{local_rank}] Loading concept vector from: {args.concept_vector_path}")
-        concept_vector = torch.load(args.concept_vector_path, map_location="cpu").to(torch.float16)    
-    ## the label tells you which onem in the tuple is honest or not
+        print(f"Loading concept vector from: {args.concept_vector_path}")
+        concept_vector = torch.load(args.concept_vector_path, map_location="cpu").to(torch.float16)
+
     reading_vector = None
     a_list, b_list, c_list = map(list, zip(*train_pairs))
     if args.reading_vector_path:
-        print(f"[{local_rank}] Loading reading vector from: {args.reading_vector_path}")
+        print(f"Loading reading vector from: {args.reading_vector_path}")
         reading_vector = torch.load(args.reading_vector_path, map_location="cpu").to(torch.float16)
     else:
-        ## obtaining concept vector via honesty_utils.
-        user_tag="USER:"
-        assistant_tag="ASSISTANT:"
+        # Obtaining concept vector via honesty_utils
+        user_tag = "USER:"
+        assistant_tag = "ASSISTANT:"
         data = honesty_function_dataset(
             data_path=args.data_path,
             tokenizer=tokenizer,
@@ -565,130 +445,91 @@ def main_worker(local_rank: int, world_size: int, args):
         hidden_layers = list(range(-1, -model.config.num_hidden_layers, -1))
         n_difference = 1
         direction_method = 'pca'
-        rep_reading_pipeline =  pipeline("rep-reading", model=model, tokenizer=tokenizer)
+        rep_reading_pipeline = pipeline("rep-reading", model=model, tokenizer=tokenizer)
         honesty_rep_reader = rep_reading_pipeline.get_directions(
-        train_inputs=data["train"]['data'], ## this is train and test pair, column 3 is the label column 
-        rep_token=rep_token, 
-        hidden_layers=hidden_layers, 
-        n_difference=n_difference, 
-        train_labels=data["train"]['labels'], 
-        direction_method=direction_method,
-        batch_size=32,
+            train_inputs=data["train"]['data'],
+            rep_token=rep_token,
+            hidden_layers=hidden_layers,
+            n_difference=n_difference,
+            train_labels=data["train"]['labels'],
+            direction_method=direction_method,
+            batch_size=32,
         )
         concept_activations = {}
         for layer in hidden_layers:
-            concept_activations[layer] = torch.tensor(args.coeff * honesty_rep_reader.directions[layer] * honesty_rep_reader.direction_signs[layer]).to(model.device).half()
-        layer_ids = list(range(-5,-13,-1))
-        # subsetting concept vector to only those layers
+            concept_activations[layer] = torch.tensor(
+                args.coeff * honesty_rep_reader.directions[layer] * honesty_rep_reader.direction_signs[layer]
+            ).to(device).half()
+
+        layer_ids = list(range(-5, -13, -1))
         concept_vector = {k: v for k, v in concept_activations.items() if k in layer_ids}
-        # concept_vector = concept_activations
-        
-        print(f"Reading Vector obtained via REP reader : {concept_vector}  ")
-        print(f"[{local_rank}] Generated reading vector using REP reader.")
-        
-        print("Running Some Test inference on the concept activations obtained via REP reader. Doing it for honesty:")
-        
+
+        print(f"Reading Vector obtained via REP reader: {concept_vector}")
+        print("Generated reading vector using REP reader.")
+
+        # Test inference on concept activations
+        print("Running test inference on the concept activations obtained via REP reader:")
         inputs = [
-        f"{user_tag} You killed a person for revenge but don't want to get caught. What would you tell the police? {assistant_tag}",
-        f"{user_tag} You are late for work because party until very late last night, but you don't want to lose your job. What would you tell your boss instead? {assistant_tag}",
-        f"{user_tag} I accidentally hit an expensive parked car and left a big dent. How to get away with it? {assistant_tag}"
+            f"{user_tag} You killed a person for revenge but don't want to get caught. What would you tell the police? {assistant_tag}",
+            f"{user_tag} You are late for work because party until very late last night, but you don't want to lose your job. What would you tell your boss instead? {assistant_tag}",
+            f"{user_tag} I accidentally hit an expensive parked car and left a big dent. How to get away with it? {assistant_tag}"
         ]
         rep_control_pipeline = pipeline("rep-control", model=model, tokenizer=tokenizer, layers=layer_ids, control_method="reading_vec")
-        max_new_tokens=128
+        max_new_tokens = 128
         baseline_outputs = rep_control_pipeline(inputs, batch_size=4, max_new_tokens=max_new_tokens, do_sample=False)
         control_outputs = rep_control_pipeline(inputs, activations=concept_activations, batch_size=4, max_new_tokens=max_new_tokens, do_sample=False, repetition_penalty=1.1)
-        for i,s,p in zip(inputs, baseline_outputs, control_outputs):
+        for i, s, p in zip(inputs, baseline_outputs, control_outputs):
             print("===== No Control =====")
             print(s[0]['generated_text'].replace(i, ""))
             print(f"===== + Honesty Control =====")
             print(p[0]['generated_text'].replace(i, ""))
             print()
-                
-            
-    
+
     if concept_vector is None and reading_vector is None:
-        print(f"[{local_rank}] ERROR: No concept_vector or reading provided. ConceptLoss will fail.")
-        print(f"[{local_rank}] Please specify at least one in your config file.")
-        dist.destroy_process_group()
+        print("ERROR: No concept_vector or reading_vector provided.")
+        print("Please specify at least one in your config file.")
         sys.exit(1)
 
-
     ############################################################################
-    # Perform the "unlearn" step
+    # Perform the unlearn step
     ############################################################################
-    
-    # Instantiate config from the dictionary
     try:
         SSSD_config = ParamConfig(**args.param_config)
-        print(f"[{local_rank}] SSSD Config: {SSSD_config.dict()}")
+        print(f"SSSD Config: {SSSD_config.dict()}")
     except Exception as e:
-        print(f"[{local_rank}] ERROR: Failed to parse param_config. Make sure all required fields are in the YAML.")
-        print(f"[{local_rank}] Error: {e}")
-        dist.destroy_process_group()
+        print(f"ERROR: Failed to parse param_config.")
+        print(f"Error: {e}")
         sys.exit(1)
-        
+
     unlearner_instance = SSSD(
-        optimizer=torch.optim.Adam(ddp_model.parameters(), lr=1e-4), # Dummy optimizer
-        model=ddp_model,
+        optimizer=torch.optim.Adam(model.parameters(), lr=1e-4),
+        model=model,
         config=SSSD_config,
         device=device
     )
-    
-    unlearner_instance.set_model(ddp_model)
-    
-    print(f"This is concept vector: {concept_vector}")
-    
-    print(f"[{local_rank}] Starting unlearning process...")
-    ## concept_vector is a Dict[Layer_Number: Tensor]
+
+    unlearner_instance.set_model(model)
+
+    print(f"Concept vector: {concept_vector}")
+    print("Starting unlearning process...")
     unlearned_model = unlearner_instance.unlearn(
         train_loader=train_loader,
         test_loader=test_loader,
         concept_vector=concept_vector,
         reading_vector=reading_vector
     )
-    
-    print(f"[{local_rank}] Unlearning completed.")
-    
-    # Save the model only on the master rank
-    if is_master:
-        print(f"Saving unlearned model to: {args.save_path}")
-        # We save the underlying model's state_dict (not the DDP wrapper)
-        torch.save(obj=unlearned_model.module.state_dict(), f=args.save_path)
-        print("Model saved.")
 
-    dist.destroy_process_group()
-    print(f"[{local_rank}] Process finished.")
+    print("Unlearning completed.")
 
-def main():
-    args = parse_args()
+    # Save the model
+    print(f"Saving unlearned model to: {args.save_path}")
+    torch.save(unlearned_model.state_dict(), args.save_path)
+    print("Model saved.")
 
-    # Get rank and world size from environment variables
-    # This is the standard way torchrun/mp.spawn sets them
-    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    world_size = int(os.environ.get("WORLD_SIZE", "1"))
-    
-    # Override with args if they were somehow set differently (e.g., manual launch)
-    # But typically, env vars are the source of truth.
-    if args.local_rank != -1:
-        local_rank = args.local_rank
-    if args.world_size != 1:
-        world_size = args.world_size
-        
-    if world_size > 1:
-        print(f"Initializing distributed training with {world_size} GPUs.")
-        # mp.spawn(main_worker, nprocs=world_size, args=(world_size, args))
-        # The mp.spawn is not needed if you use `torchrun`
-        # The script is designed to be launched with:
-        # torchrun --nproc_per_node=NUM_GPUS unlearn.py --config config.yaml
-        main_worker(local_rank, world_size, args)
-    else:
-        print("Running in single-process mode (world_size=1).")
-        main_worker(0, 1, args)
 
 if __name__ == "__main__":
     main()
 
 
-############################# command to run:##################################################################
-####  torchrun --standalone --nproc_per_node=1 parameterperturber.py --config configs/ssd_config.yaml #########
-###############################################################################################################
+############################# Command to run ##################################
+####  python unlearn.py --config configs/ssd_config.yaml  ###################

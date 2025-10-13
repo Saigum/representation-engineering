@@ -43,6 +43,7 @@ data_args:
   # Random seed for data loaders and samplers
   seed: 42
 
+  concept: "honesty"  # Name of the concept to unlearn (e.g., honesty, toxicity)
 # -----------------------------------------------------------------
 # Concept/Reading Vector Paths
 # At least one of these must be provided for ConceptLoss
@@ -53,7 +54,7 @@ vector_args:
   
   # Path to the .pt file for the reading vector (e.g., from a probe)
   reading_vector_path: null # Set to null or remove if not used
-  coeff: 1.0 # Coefficient for the reading vector  
+  coeff: 0.2 # Coefficient for the reading vector  
   # reading_vector_path: "./vectors/honesty_reading_vector.pt"
 
 # -----------------------------------------------------------------
