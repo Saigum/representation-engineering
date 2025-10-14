@@ -19,6 +19,60 @@ from repe import repe_pipeline_registry
 repe_pipeline_registry()
 ################################################################################
 
+def analyze_importance_tensors(retain_importances, forget_importances, param_names_to_modify):
+    """
+    Calculates and prints statistics comparing retain and forget importance tensors.
+    """
+    print("\n" + "="*50)
+    print("      START: Importance Tensor Analysis      ")
+    print("="*50)
+
+    
+    overall_metrics = {
+        "mse": [],
+        "cosine_sim": []
+    }
+
+    # Sort for consistent output order
+    sorted_param_names = sorted(list(param_names_to_modify))
+
+    for name in sorted_param_names:
+        if name not in retain_importances or name not in forget_importances:
+            print(f"Skipping {name} as it's missing from one of the importance dictionaries.")
+            continue
+
+        # Use .float() for more stable calculations, especially if using float16
+        r_imp = retain_importances[name].detach().to(torch.bfloat16)
+        f_imp = forget_importances[name].detach().to(torch.bfloat16)
+
+        # Per-tensor statistics
+        r_mean, r_std = r_imp.mean().item(), r_imp.std().item()
+        f_mean, f_std = f_imp.mean().item(), f_imp.std().item()
+
+        # Comparative statistics
+        mse = torch.nn.functional.mse_loss(r_imp, f_imp).item()
+        cosine_sim = torch.nn.functional.cosine_similarity(r_imp.flatten(), f_imp.flatten(), dim=0).item()
+
+        overall_metrics["mse"].append(mse)
+        overall_metrics["cosine_sim"].append(cosine_sim)
+
+        print(f"\nParameter: {name}")
+        print(f"  - Shape: {list(r_imp.shape)}")
+        print(f"  - Retain Imp | Mean: {r_mean:.4e}, Std: {r_std:.4e}, Min: {r_imp.min():.4e}, Max: {r_imp.max():.4e}")
+        print(f"  - Forget Imp | Mean: {f_mean:.4e}, Std: {f_std:.4e}, Min: {f_imp.min():.4e}, Max: {f_imp.max():.4e}")
+        print(f"  - Comparison | MSE: {mse:.4e}, Cosine Similarity: {cosine_sim:.4f}")
+
+    # Calculate overall averages
+    avg_mse = sum(overall_metrics["mse"]) / len(overall_metrics["mse"]) if overall_metrics["mse"] else 0
+    avg_cosine_sim = sum(overall_metrics["cosine_sim"]) / len(overall_metrics["cosine_sim"]) if overall_metrics["cosine_sim"] else 0
+
+    print("\n" + "-"*50)
+    print("Overall Average Statistics:")
+    print(f"  - Average MSE: {avg_mse:.4e}")
+    print(f"  - Average Cosine Similarity: {avg_cosine_sim:.4f}")
+    print("="*50)
+    print("       END: Importance Tensor Analysis       ")
+    print("="*50 + "\n")
 
 class ParamConfig(BaseModel):
     lower_bound: int = 1
@@ -65,6 +119,7 @@ class ConceptLoss(torch.nn.Module):
         return loss / len(activations)
 
 
+
 ################################################################################
 # 1) ParameterPerturber and ssd_tuning logic
 ################################################################################
@@ -75,11 +130,12 @@ class ParameterPerturber(torch.nn.Module):
         device,
         optimizer: torch.optim.Optimizer,
         parameters: ParamConfig,
-        layer_number: Union[int, slice] = -1,
+        # --- CHANGE 1: Accept a specific list of layers to modify ---
+        layer_indices_to_modify: list,
         use_contrast_vector: bool = False
     ):
         """
-        layer_number can be an int for a specific layer, or a slice, for the range of layers
+        layer_indices_to_modify should be the list of negative layer indices (e.g., [-5, -6, ...])
         """
         super(ParameterPerturber, self).__init__()
         self.model = model
@@ -87,39 +143,31 @@ class ParameterPerturber(torch.nn.Module):
         self.optimizer = optimizer
         self.paramconfig = parameters
 
-        self.layer_number = layer_number
+        # --- Store the original negative indices for use in calc_importance ---
+        self.layer_indices_to_modify = sorted(layer_indices_to_modify, reverse=True)
 
-        self.paramset = {}
+        # --- CHANGE 2: Select parameters based on the provided list of layers ---
         num_blocks = sum(1 for _ in iter_transformer_blocks(self.model))
         print(f"Total model blocks: {num_blocks}")
-
-        # Determine the target layer index
-        if layer_number < 0:
-            target_layer_index = num_blocks + layer_number
-        else:
-            target_layer_index = layer_number
-
-        print(f"Targeting layers up to (but not including) index: {target_layer_index} (layer_number arg: {layer_number})")
+        
+        # Convert negative indices to the corresponding positive indices
+        positive_indices_to_modify = {num_blocks + i if i < 0 else i for i in self.layer_indices_to_modify}
+        print(f"Targeting specific layers for modification. Positive indices: {sorted(list(positive_indices_to_modify))}")
 
         self.param_names_to_modify = set()
-        count = 0
         for path, i, block in iter_transformer_blocks(self.model):
-            if i < target_layer_index:
+            if i in positive_indices_to_modify:
                 for name, param in block.named_parameters():
                     full_name = f"{path}.{i}.{name}"
                     self.param_names_to_modify.add(full_name)
-                    count += 1
 
         self.num_params_to_modify = len(self.param_names_to_modify)
-        print(f"Following are param_names to modify: {self.param_names_to_modify}")
-        print(f"Identified {self.num_params_to_modify} parameters in {target_layer_index} blocks for modification.")
+        print(f"Identified {self.num_params_to_modify} parameters in {len(positive_indices_to_modify)} targeted blocks for modification.")
+        
         self.lower_bound = self.paramconfig.lower_bound
         self.exponent = self.paramconfig.exponent
-
         self.use_contrast_vector = use_contrast_vector
-        # param_dict = dict(self.model.named_parameters())
-        # print(self.param_names_to_modify)
-        # print(f"ParamDict: {param_dict.keys()}")
+
     def __zero_params__(self):
         # Create zeros only for the parameters we intend to modify
         return {
@@ -144,7 +192,6 @@ class ParameterPerturber(torch.nn.Module):
             return importances
 
         self.model.train()
-        batch_counter = 0
         total_batches = len(dataloader)
 
         with tqdm(total=total_batches, desc="Calculating Importances") as pbar:
@@ -156,12 +203,32 @@ class ParameterPerturber(torch.nn.Module):
                 pos_attention_mask = attention_mask[:,0]
                 neg_attention_mask = attention_mask[:,1]
                 loss = 0
-                # input_embeddings = self.model.get_input_embeddings()(input_ids)
+                
                 if isinstance(loss_, ConceptLoss):
                     outputs = self.model(pos_input_ids,pos_attention_mask, output_hidden_states=True)
-                    hidden_states = outputs.hidden_states
-                    selected_hidden_state = hidden_states[:self.layer_number]
-                    loss = loss_(selected_hidden_state)
+                    hidden_states = outputs.hidden_states # Tuple: (embeddings, layer_0_out, ...)
+
+                    # --- CHANGE 4: Correctly select hidden states based on layer_indices_to_modify ---
+                    num_model_layers = self.model.config.num_hidden_layers
+                    activations_for_loss = []
+                    
+                    # Iterate through the original negative indices we stored
+                    for neg_idx in self.layer_indices_to_modify:
+                        # Convert negative layer index to a positive one
+                        model_idx = num_model_layers + neg_idx
+                        # The `hidden_states` tuple includes embeddings at index 0,
+                        # so the output of transformer block `k` is at `hidden_states[k+1]`.
+                        correct_hidden_state_idx = model_idx + 1
+                        
+                        if 0 <= correct_hidden_state_idx < len(hidden_states):
+                            activations_for_loss.append(hidden_states[correct_hidden_state_idx])
+                        else:
+                            print(f"Warning: Calculated index {correct_hidden_state_idx} for neg_idx {neg_idx} is out of bounds.")
+                    
+                    # The order of activations now matches the order of concept_vector keys (0, 1, 2...)
+                    # because we sorted both lists in the same direction (descending layer number).
+                    if activations_for_loss:
+                        loss = loss_(activations_for_loss)
 
                 elif isinstance(loss_, CrossEntropyLoss):
                     labels = pos_input_ids  # Standard causal LM loss
@@ -235,7 +302,8 @@ def forget_retain_signal_tuning(
     concept_vector: Optional[Tensor],
     reading_vector: Optional[Tensor],
     device: str = "cuda",
-    layer_number: int = -1,
+    # --- CHANGE 3: Accept the specific list of layers ---
+    layer_ids: list = None,
     forget_loss_class: torch.nn.Module = ConceptLoss,
     retain_loss_class: Optional[torch.nn.Module] = CrossEntropyLoss,
     config: ParamConfig = ParamConfig(dampening_constant=0.1, selection_weighting=0.1),
@@ -256,10 +324,17 @@ def forget_retain_signal_tuning(
     params_to_optimize = model.parameters()
     optimizer = torch.optim.Adam(params_to_optimize, lr=1e-4)
 
-    pdr = ParameterPerturber(model, device, optimizer, config, layer_number)
+    # --- Pass layer_ids directly to the perturber ---
+    pdr = ParameterPerturber(model, device, optimizer, config, layer_indices_to_modify=layer_ids)
 
     print("Calculating FORGET importances...")
     forget_importances = pdr.calc_importance(dataloader, loss_=forget_loss, accum_steps=config.forget_threshold)
+    
+    # # --- MEMORY SAVING CHANGE: Move to CPU to save VRAM ---
+    # print("Moving forget_importances to CPU to save VRAM...")
+    # for name in forget_importances:
+    #     forget_importances[name] = forget_importances[name].to('cpu')
+    # torch.cuda.empty_cache()
 
     if retain_loss is not None:
         print("Calculating RETAIN importances...")
@@ -280,6 +355,9 @@ def forget_retain_signal_tuning(
         if (importance < 1e-10).all():
             print(f"Warning: All near-zero forget importance for param {param}")
 
+    print("Analyzing Importance Tensors ....")
+    analyze_importance_tensors(retain_importances, forget_importances, pdr.param_names_to_modify)
+
     print("Modifying weights...")
     pdr.modify_weight(retain_importances, forget_importances)
     print("Weight modification complete.")
@@ -295,13 +373,16 @@ class SSSD():
         optimizer: torch.optim.Optimizer,
         model: torch.nn.Module,
         config: ParamConfig,
-        device: str
+        device: str,
+        layer_ids:list
     ):
         self.optimizer = optimizer
         self.model = model
         self.config = config
         self.device = device
         self.save_files = {"train_time_taken": 0.0}
+        # --- Store layer_ids ---
+        self.layer_ids = layer_ids
 
     def set_model(self, model):
         self.model = model
@@ -316,7 +397,8 @@ class SSSD():
             concept_vector=concept_vector,
             reading_vector=reading_vector,
             device=self.device,
-            layer_number=self.config.min_layer,
+            # --- Pass the stored layer_ids ---
+            layer_ids=self.layer_ids,
             config=self.config
         )
 
@@ -383,7 +465,7 @@ def main():
     # Model Setup
     ############################################################################
     print(f"Loading model: {args.model_name}")
-    model = AutoModelForCausalLM.from_pretrained(args.model_name, torch_dtype=torch.float16, trust_remote_code=True).to(device)
+    model = AutoModelForCausalLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16, trust_remote_code=True).to(device)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
     # if tokenizer.pad_token is None:
     #     tokenizer.pad_token = tokenizer.eos_token
@@ -424,13 +506,13 @@ def main():
     concept_vector = None
     if args.concept_vector_path:
         print(f"Loading concept vector from: {args.concept_vector_path}")
-        concept_vector = torch.load(args.concept_vector_path, map_location="cpu").to(torch.float16)
+        concept_vector = torch.load(args.concept_vector_path, map_location="cpu").to(torch.bfloat16)
 
     reading_vector = None
     a_list, b_list, c_list = map(list, zip(*train_pairs))
     if args.reading_vector_path:
         print(f"Loading reading vector from: {args.reading_vector_path}")
-        reading_vector = torch.load(args.reading_vector_path, map_location="cpu").to(torch.float16)
+        reading_vector = torch.load(args.reading_vector_path, map_location="cpu").to(torch.bfloat16)
     else:
         # Obtaining concept vector via honesty_utils
         user_tag = "USER:"
@@ -460,11 +542,12 @@ def main():
         for layer in hidden_layers:
             concept_activations[layer] = torch.tensor(
                 args.coeff * honesty_rep_reader.directions[layer] * honesty_rep_reader.direction_signs[layer]
-            ).to(device).half()
+            ).to(torch.bfloat16).to(device)
 
         layer_ids = list(range(-5, -13, -1))
         idx = 0 
         concept_vector = {}
+        ## re-indexing to use 0,1,2,.. instead of -5,-6,...
         for k,v in concept_activations.items():
             if k in layer_ids:
                 concept_vector[idx] = v
@@ -473,6 +556,10 @@ def main():
 
         print(f"Reading Vector obtained via REP reader: {concept_vector}")
         print("Generated reading vector using REP reader.")
+        
+        ## Saving
+        print("Saving Concept Vector to a file: honesty_rep_reading_vector.pt")
+        torch.save(concept_vector, "honesty_rep_reading_vector.pt")
 
         # Test inference on concept activations
         print("Running test inference on the concept activations obtained via REP reader:")
@@ -512,7 +599,9 @@ def main():
         optimizer=torch.optim.Adam(model.parameters(), lr=1e-4),
         model=model,
         config=SSSD_config,
-        device=device
+        device=device,
+        layer_ids=layer_ids
+        
     )
 
     unlearner_instance.set_model(model)
@@ -536,7 +625,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-############################# Command to run ##################################
-####  python unlearn.py --config configs/ssd_config.yaml  ###################
