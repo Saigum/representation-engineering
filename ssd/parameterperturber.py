@@ -277,6 +277,8 @@ class ParameterPerturber(torch.nn.Module):
         param_dict = dict(self.model.named_parameters())
         num_parameters_modified = 0
         params_modified_per_tensor = {}
+        layer_mse = {}
+        relative_mse = {}   
         with torch.no_grad():
             # print(original_importances.keys())
             # print(new_importances.keys())
@@ -290,7 +292,7 @@ class ParameterPerturber(torch.nn.Module):
                 params_modified_per_tensor[name] = locations[0].numel() 
                 fimp_safe = fimp + 1e-12
                 ### oimp/fimp for the strength of dampening.
-                ## is oimp/fimp is high => 
+                ## if oimp/fimp is low, then it will be closer to 0, thereby further dampening the weight post multiplication
                 weight = (
                     (oimp.mul(self.paramconfig.dampening_constant)).div(fimp_safe)
                 ).pow(self.exponent)
@@ -302,12 +304,22 @@ class ParameterPerturber(torch.nn.Module):
                 min_locs = torch.where(update > self.lower_bound)
                 update[min_locs] = self.lower_bound
                 print(f"Shape of place going to be modified: {param_dict[name][locations].shape}, Shape of update: {update.shape}")
+                pre_params = param_dict[name].clone()
                 param_dict[name][locations] = param_dict[name][locations].mul(update)
+                ## calculating the mean squared difference between the old and new weights
+                with torch.no_grad():
+                    mse = torch.nn.functional.mse_loss(pre_params, param_dict[name]).item()
+                    layer_mse[name] = mse
+                    relative_mse[name] = mse / torch.mean(pre_params[locations].pow(2)).item()
                 
         print("Total Number of parameters modified:", sum(params_modified_per_tensor.values()))
         print("Parameters modified per tensor:")
         print(params_modified_per_tensor)
         
+        print("Relative Mean Squared Difference per tensor after modification:")
+        print(relative_mse)
+        print("Average Relative MSE across all modified tensors:", sum(relative_mse.values())/len(relative_mse))
+
         # print(f"Went through {count} tensors.")
 
 
