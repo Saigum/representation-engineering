@@ -1,4 +1,6 @@
+import os
 import random
+import json
 from typing import List, Tuple, Dict, Optional
 import numpy as np
 import pandas as pd
@@ -8,7 +10,25 @@ from transformers import PreTrainedTokenizerBase
 import torch.nn as nn
 from transformers import PreTrainedTokenizer
 
-def honesty_function_dataset(data_path: str, tokenizer: PreTrainedTokenizer, user_tag: str = "", assistant_tag: str = "", seed: int = 0) -> (list, list):
+def _read_file(data_path: str) -> List[str]:
+    # check for file type of data_path
+    _, file_extension = os.path.splitext(data_path)
+    if file_extension.lower() == ".json":
+        with open(data_path, "r") as f:
+            positive_statements = json.load(f)
+
+    elif file_extension.lower() == ".csv": # assumes same as honesty format
+        df = pd.read_csv(data_path)
+        positive_statements = df[df["label"] == 1]["statement"].dropna().astype(str).tolist()
+
+    else:
+        raise ValueError(f"Unsupported file type: {file_extension}")
+
+    return positive_statements
+
+
+# why does this exist??
+def emotion_function_dataset(data_path: str, tokenizer: PreTrainedTokenizer, user_tag: str = "", assistant_tag: str = "", seed: int = 0, emotion: str = "happiness") -> (list, list):
     """
     Processes data to create training and testing datasets based on honesty.
 
@@ -22,54 +42,43 @@ def honesty_function_dataset(data_path: str, tokenizer: PreTrainedTokenizer, use
     Returns:
     - Tuple containing train and test data.
     """
+    positive_statements = _read_file(data_path)
 
-    # Setting the seed for reproducibility
-    random.seed(seed)
+    train_pairs, test_pairs = build_emotion_pairs(
+        positive_statements=positive_statements,
+        tokenizer=tokenizer,
+        emotion=emotion,
+        user_tag=user_tag,
+        assistant_tag=assistant_tag,
+        seed=seed,
+        min_tail_tokens=5,
+        min_prefix_tokens=1,
+        prefixes_per_statement=float('inf'), # use all prefixes
+        n_train_pairs=512,
+        n_test_pairs=512,
+    )
 
-    # Load the data
-    df = pd.read_csv(data_path)
-    true_statements = df[df['label'] == 1]['statement'].values.tolist()
-    false_statements = df[df['label'] == 0]['statement'].values.tolist()
+    train_data, train_labels = [], []
+    for text0, text1, label_idx in train_pairs:
+        # Flatten the text pair into the data list
+        train_data.append(text0)
+        train_data.append(text1)
 
-    template_str = "Pretend you're {type} person making statements about the world."
-    honest_statements = []
-    untruthful_statements = []
+        pair_labels = [label_idx == 0, label_idx == 1]
+        train_labels.append(pair_labels)
 
-    # Process statements
-    for statement in true_statements:
-        tokens = tokenizer.tokenize(statement)
-        
-        for idx in range(1, len(tokens) - 5):
-            truncated_tokens = tokens[:idx]
-            truncated_statement = tokenizer.convert_tokens_to_string(truncated_tokens)
+    test_data, test_labels = [], []
+    for text0, text1, label_idx in test_pairs:
+        # Flatten the text pair into the data list
+        test_data.append(text0)
+        test_data.append(text1)
 
-            honest_statements.append(f"{user_tag} {template_str.format(type='an honest')} {assistant_tag} " + truncated_statement)
-            untruthful_statements.append(f"{user_tag} {template_str.format(type='an untruthful')} {assistant_tag} " + truncated_statement)
-
-    # Create training data
-    ntrain = 512
-    combined_data = [[honest, untruthful] for honest, untruthful in zip(honest_statements, untruthful_statements)]
-    train_data = combined_data[:ntrain]
-
-    train_labels = []
-    ## shuffle and append the index of the true statement
-    for d in train_data:
-        true_s = d[0]
-        random.shuffle(d)
-        train_labels.append([s == true_s for s in d])
-    
-    train_data = np.concatenate(train_data).tolist()
-
-    # Create test data
-    reshaped_data = np.array([[honest, untruthful] for honest, untruthful in zip(honest_statements[:-1], untruthful_statements[1:])]).flatten()
-    test_data = reshaped_data[ntrain:ntrain*2].tolist()
-
-    print(f"Train data: {len(train_data)}")
-    print(f"Test data: {len(test_data)}")
+        pair_labels = [label_idx == 0, label_idx == 1]
+        test_labels.append(pair_labels)
 
     return {
         'train': {'data': train_data, 'labels': train_labels},
-        'test': {'data': test_data, 'labels': [[1,0]] * len(test_data)}
+        'test': {'data': test_data, 'labels': test_labels}
     }
 
 
@@ -184,13 +193,13 @@ def iter_transformer_blocks(model, part: str = "auto"):
 
 
 
-def build_honesty_pairs(
-    data_path: str,
+def build_emotion_pairs(
+    positive_statements: List[str],
     tokenizer: PreTrainedTokenizerBase,
     *,
     user_tag: str = "",
     assistant_tag: str = "",
-    template: str = "Pretend you're {type} person making statements about the world.",
+    emotion: str = "happiness",
     seed: int = 0,
     min_tail_tokens: int = 5,
     min_prefix_tokens: int = 3,
@@ -213,13 +222,14 @@ def build_honesty_pairs(
     random.seed(seed)
 
     # Load data
-    df = pd.read_csv(data_path)
-    true_statements = df[df["label"] == 1]["statement"].dropna().astype(str).tolist()
 
-    honest_texts: List[str] = []
-    untruthful_texts: List[str] = []
+    template_pos = f"Pretend you're a person who is experiencing or engaging in {emotion}"
+    template_neg = f"Pretend you're a person who is NOT experiencing or engaging in {emotion}"
 
-    for stmt in true_statements:
+    emotion_texts: List[str] = []
+    unemotion_texts: List[str] = []
+
+    for stmt in positive_statements:
         tokens = tokenizer.tokenize(stmt)
         L = len(tokens)
         # Need room for a tail to avoid trivial completions (like your original -5)
@@ -228,7 +238,11 @@ def build_honesty_pairs(
 
         # Choose prefix cut points
         valid_idxs = np.arange(min_prefix_tokens, L - min_tail_tokens)
-        k = min(prefixes_per_statement, len(valid_idxs))
+        if prefixes_per_statement == float('inf'):
+            k = len(valid_idxs)
+        else:
+            k = min(prefixes_per_statement, len(valid_idxs))
+
         if k <= 0:
             continue
         idxs = rng.choice(valid_idxs, size=k, replace=False)
@@ -238,23 +252,23 @@ def build_honesty_pairs(
             truncated_tokens = tokens[: int(idx)]
             truncated_text = _tokens_to_text(tokenizer, truncated_tokens)
 
-            honest_prompt = _join_nonempty([
+            positive_prompt = _join_nonempty([
                 user_tag,
-                template.format(type="an honest"),
+                template_pos,
                 assistant_tag,
                 truncated_text,
             ])
-            untruthful_prompt = _join_nonempty([
+            negative_prompt = _join_nonempty([
                 user_tag,
-                template.format(type="an untruthful"),
+                template_neg,
                 assistant_tag,
                 truncated_text,
             ])
 
-            honest_texts.append(honest_prompt)
-            untruthful_texts.append(untruthful_prompt)
+            emotion_texts.append(positive_prompt)
+            unemotion_texts.append(negative_prompt)
 
-    N = len(honest_texts)
+    N = len(emotion_texts)
     if N < 2:
         raise ValueError(
             f"Not enough prefixes created ({N}). Try lowering min_prefix_tokens, "
@@ -263,20 +277,20 @@ def build_honesty_pairs(
 
     # shuffle in a reproducible way (but keep honest/untruthful aligned)
     order = rng.permutation(N)
-    honest_texts = [honest_texts[i] for i in order]
-    untruthful_texts = [untruthful_texts[i] for i in order]
+    emotion_texts = [emotion_texts[i] for i in order]
+    unemotion_texts = [unemotion_texts[i] for i in order]
 
     # ----- TRAIN -----
     n_train = min(n_train_pairs, N - 1)  # leave at least 1 for test alignment
     train_pairs: List[Tuple[str, str, int]] = []
     for i in range(n_train):
-        h = honest_texts[i]
-        u = untruthful_texts[i]
+        h = emotion_texts[i]
+        u = unemotion_texts[i]
         # Randomly decide whether to swap, label is index of honest
         if rng.integers(2) == 0:
-            pair = (h, u, 0)  # honest first
+            pair = (h, u, 0)  # positive emotion first
         else:
-            pair = (u, h, 1)  # honest second
+            pair = (u, h, 1)  # positive emotion second
         train_pairs.append(pair)
 
     # ----- TEST -----
@@ -292,7 +306,7 @@ def build_honesty_pairs(
     for i in range(start, end):
         j = i + 1  # misalignment; guaranteed < N by construction above
         # honest first, untruthful from next index
-        test_pairs.append((honest_texts[i], untruthful_texts[j], 0))
+        test_pairs.append((emotion_texts[i], unemotion_texts[j], 0))
 
     return train_pairs, test_pairs
 
@@ -360,13 +374,13 @@ def make_collate_fn(
 
 # ---------- top-level convenience ----------
 
-def make_honesty_dataloaders(
+def make_emotion_dataloaders(
     data_path: str,
     tokenizer: PreTrainedTokenizerBase,
     *,
+    emotion: str,
     user_tag: str = "",
     assistant_tag: str = "",
-    template: str = "Pretend you're {type} person making statements about the world.",
     seed: int = 0,
     min_tail_tokens: int = 5,
     min_prefix_tokens: int = 3,
@@ -386,12 +400,14 @@ def make_honesty_dataloaders(
       - attention_mask:(B, 2, L)
       - labels:        (B,)   (0 or 1; index of honest option)
     """
-    train_pairs, test_pairs = build_honesty_pairs(
-        data_path=data_path,
+    positive_statements = _read_file(data_path)
+
+    train_pairs, test_pairs = build_emotion_pairs(
+        positive_statements=positive_statements,
         tokenizer=tokenizer,
+        emotion=emotion,
         user_tag=user_tag,
         assistant_tag=assistant_tag,
-        template=template,
         seed=seed,
         min_tail_tokens=min_tail_tokens,
         min_prefix_tokens=min_prefix_tokens,

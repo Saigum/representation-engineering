@@ -5,7 +5,7 @@ from tqdm import tqdm
 import sys
 import yaml
 import argparse
-from function_utils import iter_transformer_blocks, build_honesty_pairs, PairsTextDataset, honesty_function_dataset,make_honesty_dataloaders
+from function_utils import iter_transformer_blocks, PairsTextDataset, emotion_function_dataset, make_emotion_dataloaders
 from torch import Tensor
 from typing import Optional, Union
 from torch.nn import CrossEntropyLoss
@@ -465,6 +465,7 @@ def parse_args():
     # Data args
     data_args = config_data.get('data_args', {})
     parser.add_argument("--data_path", type=str, default=data_args.get('data_path', './data/'), help="Path to the honesty dataset.")
+    parser.add_argument("--concept", type=str, default=data_args.get('concept', 'happiness'), help="Name of emotion to forget. E.g. happiness, honest.")
     parser.add_argument("--n_train_pairs", type=int, default=data_args.get('n_train_pairs', 1000), help="Number of training pairs.")
     parser.add_argument("--n_test_pairs", type=int, default=data_args.get('n_test_pairs', 100), help="Number of test pairs.")
     parser.add_argument("--batch_size", type=int, default=data_args.get('batch_size', 1), help="Batch size.")
@@ -504,24 +505,25 @@ def main():
     # Data Setup (No distributed samplers)
     ############################################################################
     print("Setting up datasets...")
-    train_pairs, test_pairs = build_honesty_pairs(
-        data_path=args.data_path,
-        tokenizer=tokenizer,
-        user_tag="USER:",
-        assistant_tag="ASSISTANT:",
-        seed=args.seed,
-        n_train_pairs=args.n_train_pairs,
-        n_test_pairs=args.n_test_pairs,
-    )
+    # train_pairs, test_pairs = build_honesty_pairs(
+    #     data_path=args.data_path,
+    #     tokenizer=tokenizer,
+    #     user_tag="USER:",
+    #     assistant_tag="ASSISTANT:",
+    #     seed=args.seed,
+    #     n_train_pairs=args.n_train_pairs,
+    #     n_test_pairs=args.n_test_pairs,
+    # )
 
-    train_ds = PairsTextDataset(train_pairs)
-    test_ds = PairsTextDataset(test_pairs)
+    # train_ds = PairsTextDataset(train_pairs)
+    # test_ds = PairsTextDataset(test_pairs)
 
     # train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0, pin_memory=True)
     # test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=True)
-    train_loader,test_loader = make_honesty_dataloaders(data_path=args.data_path,
+    train_loader,test_loader = make_emotion_dataloaders(data_path=args.data_path,
                                                         tokenizer=tokenizer,user_tag="USER:",
                                                         assistant_tag="ASSISTANT:",
+                                                        emotion=args.concept,
                                                         seed=args.seed,n_train_pairs=args.n_train_pairs,    
                                                         n_test_pairs=args.n_test_pairs,batch_size=args.batch_size)
     
@@ -536,7 +538,7 @@ def main():
         concept_vector = torch.load(args.concept_vector_path, map_location="cpu").to(torch.bfloat16)
 
     reading_vector = None
-    a_list, b_list, c_list = map(list, zip(*train_pairs))
+    # a_list, b_list, c_list = map(list, zip(*train_pairs))
     if args.reading_vector_path:
         print(f"Loading reading vector from: {args.reading_vector_path}")
         reading_vector = torch.load(args.reading_vector_path, map_location="cpu").to(torch.bfloat16)
@@ -544,12 +546,13 @@ def main():
         # Obtaining concept vector via honesty_utils
         user_tag = "USER:"
         assistant_tag = "ASSISTANT:"
-        data = honesty_function_dataset(
+        data = emotion_function_dataset(
             data_path=args.data_path,
             tokenizer=tokenizer,
             user_tag=user_tag,
             assistant_tag=assistant_tag,
-            seed=args.seed
+            seed=args.seed,
+            emotion=args.concept,
         )
         rep_token = -1
         hidden_layers = list(range(-1, -model.config.num_hidden_layers, -1))
