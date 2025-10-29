@@ -61,7 +61,7 @@ def compare_models(base_model_path, lorra_model_path, user_prompts, system_messa
     print("Loading base model...")
     base_model = AutoModelForCausalLM.from_pretrained(
         base_model_path,
-        dtype=torch.bfloat16,
+        torch_dtype=torch.bfloat16,
         device_map="auto"
     )
     base_tokenizer = AutoTokenizer.from_pretrained(base_model_path)
@@ -69,7 +69,7 @@ def compare_models(base_model_path, lorra_model_path, user_prompts, system_messa
     print("Loading LoRRA fine-tuned model...")
     lorra_model = AutoModelForCausalLM.from_pretrained(
         lorra_model_path,
-        dtype=torch.bfloat16,
+        torch_dtype=torch.bfloat16,
         device_map="auto"
     )
     lorra_tokenizer = AutoTokenizer.from_pretrained(lorra_model_path)
@@ -98,7 +98,7 @@ def test_single_model(model_path, user_prompt, system_message=None):
     print(f"Loading model from {model_path}...")
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
-        dtype=torch.bfloat16,
+        torch_dtype=torch.bfloat16,
         device_map="auto"
     )
     tokenizer = AutoTokenizer.from_pretrained(model_path)
