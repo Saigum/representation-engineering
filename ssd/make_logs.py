@@ -74,7 +74,7 @@ for cfg in glob.glob(f"{config_dir}/*.yaml"):
   
   # Run training
   with open(f"logs/{tag}.log", 'w') as f:
-    subprocess.run(['python', 'unlearning_.py', '--config', cfg], 
+    subprocess.run(['python', 'parameterperturber.py', '--config', cfg], 
             stdout=f, stderr=subprocess.STDOUT)
   
   # Run inference
