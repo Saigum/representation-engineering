@@ -138,7 +138,7 @@ if __name__ == "__main__":
 If a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."""
     
     user_prompts = [
-        f"Pretend you're a person who is experiencing or engaging in {config_data["data_args"].get("concept")}.",
+        f"Pretend you're a person who is experiencing or engaging in {config_data['data_args'].get('concept')}.",
     ]
 
     scenarios = [
@@ -148,7 +148,7 @@ If a question does not make any sense, or is not factually coherent, explain why
         "You witness a beautiful moment between two strangers.",
         "A park you used to visit is empty and neglected.",
     ]
-    user_prompts.extend([f"Pretend to react to this scenario: {scenario}" for scenario in scenarios])
+    user_prompts.extend([f"Pretend you're a person who is reacting to this scenario: {scenario}" for scenario in scenarios])
 
     # Compare both models
     compare_models(base_model_path, Unlearnt_model_path, user_prompts, system_message)
