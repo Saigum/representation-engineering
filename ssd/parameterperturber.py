@@ -461,6 +461,7 @@ def parse_args():
     model_args = config_data.get('model_args', {})
     parser.add_argument("--model_name", type=str, default=model_args.get('model_name', 'gpt2'), help="Model name or path.")
     parser.add_argument("--save_path", type=str, default=model_args.get('save_path', 'unlearned_model.pth'), help="Path to save the unlearned model.")
+    parser.add_argument("--save_dir",type=str,default=model_args.get('save_dir','save_directory') ,help="HuggingFaceSave")
 
     # Data args
     data_args = config_data.get('data_args', {})
@@ -656,8 +657,9 @@ def main():
     
     ## huggingface save to ./save_directory
     print("HuggingFace save")   
-    unlearned_model.save_pretrained("./save_directory")
-    
+    os.makedirs(args.save_dir,exist_ok=True)
+    unlearned_model.save_pretrained(args.save_dir)
+
     print("Model saved.")
 
 
