@@ -7,7 +7,8 @@ from collections import defaultdict
 from tqdm import tqdm
 from torch.utils.data import Dataset, DataLoader
 import argparse
-
+import yaml
+import sys
 class TestSet(Dataset):
     def __init__(self, user_prompts):
             self.user_prompts = user_prompts
@@ -265,6 +266,14 @@ def compare_models(base_model_path, unlearned_model_path, user_prompts, system_m
     print("Saved comprehensive statistics to results/comprehensive_statistics.json")
     print("="*80)
 
+DATASET_PATHS = {
+    "honesty": "data/facts/facts_true_false.csv",
+    "anger": "data/emotions/anger.json",
+    "happiness": "data/emotions/happiness.json",
+    "sadness": "data/emotions/sadness.json",
+    "surprise": "data/emotions/surprise.json",
+    "disgust": "data/emotions/disgust.json"
+}
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="A simple script that demonstrates argparse.")
@@ -282,16 +291,17 @@ if __name__ == "__main__":
     else:
         print("No --config file provided. Using command-line args or defaults.")
     
+    concept = config_data["data_args"].get("concept","happiness")
 
     unlearnt_model_dir = config_data["model_args"].get("save_dir","save_directory")
     unlearnt_model_path = unlearnt_model_dir
     base_model_path = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
-    with open("../data/emotions/happiness.json", "r") as f:
+    with open(DATASET_PATHS[concept], "r") as f:
         user_prompts = json.load(f)
 
     # Configure number of samples to use (None = use all)
     NUM_SAMPLES = 10  # Change this to desired number, or set to None for all samples
 
     # classes: anger, disgust, fear, joy, neutrality, sadness, and surprise.
-    compare_models(base_model_path, unlearnt_model_path, user_prompts, focus_label="anger", num_samples=NUM_SAMPLES)
+    compare_models(base_model_path, unlearnt_model_path, user_prompts, focus_label=concept, num_samples=NUM_SAMPLES)
