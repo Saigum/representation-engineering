@@ -27,7 +27,7 @@ def worker_for_gpu(gpu_id:int, cfg_files:list[str], log_dir:str):
         try:
             with open(f"{log_dir}/{tag}.log", 'w') as f:
                 subprocess.run(
-                    ['python', 'parameterperturber.py', '--config', config_file],
+                    ['python', 'grad_parameterperturber.py', '--config', config_file],
                     stdout=f, stderr=subprocess.STDOUT, env=env, check=True
                 )
             with open(f"{log_dir}/{tag}_inference.log", 'w') as f:
