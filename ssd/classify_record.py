@@ -6,7 +6,12 @@ from statistics import mean, fmean, stdev
 from collections import defaultdict
 from tqdm import tqdm
 from torch.utils.data import Dataset, DataLoader
+import pandas as pd ## <-- ADDED: Import pandas
 import argparse
+import yaml
+
+# The TestSet and generate_response functions remain the same.
+# ... (your existing TestSet and generate_response code) ...
 
 class TestSet(Dataset):
     def __init__(self, user_prompts):
@@ -103,7 +108,7 @@ def compare_models(base_model_path, unlearned_model_path, user_prompts, system_m
 
     print("Loading fine-tuned model...")
     unlearned_model = AutoModelForCausalLM.from_pretrained(
-        unlearned_model_path, torch_dtype=torch.bfloat16, device_map="auto"
+        unlearned_model_path, torch_dtype=torch.b`float16, device_map="auto"
     )
     unlearned_tokenizer = base_tokenizer
 
@@ -127,14 +132,10 @@ def compare_models(base_model_path, unlearned_model_path, user_prompts, system_m
 
 
     for i, prompts in enumerate(tqdm(testloader, desc="Processing prompts", unit="prompt"), 1):
-        # print(f"\n{'='*80}")
-        # print(f"PROMPT {i}: {user_prompt}")
-        # print(f"{'='*80}")
-
         base_response = generate_response(base_model, base_tokenizer, prompts, system_message)
         unlearned_response = generate_response(unlearned_model, unlearned_tokenizer, prompts, system_message)
 
-        base_pred = classifier(base_response)  # list of dicts [{label, score}, ...]
+        base_pred = classifier(base_response)
         unlearned_pred = classifier(unlearned_response)
 
         for i, (prompt_text, base_resp, unlearned_resp, b_pred, u_pred) in enumerate(
@@ -166,8 +167,6 @@ def compare_models(base_model_path, unlearned_model_path, user_prompts, system_m
             unlearned_focus = next(d["score"] for d in u_pred if d["label"] == focus_label)
             better = "base" if base_focus > unlearned_focus else "unlearned" if unlearned_focus > base_focus else "tie"
 
-            # print(f"\nBase {focus_label}={base_focus:.4f} | unlearned {focus_label}={unlearned_focus:.4f} → {better.upper()}")
-
     # Save individual model outputs
     os.makedirs("results", exist_ok=True)
     
@@ -192,7 +191,9 @@ def compare_models(base_model_path, unlearned_model_path, user_prompts, system_m
         "num_prompts": len(user_prompts)
     }
     
-    print(f"\n{'Label':<15} {'Model':<8} {'Mean':<10} {'Std Dev':<10} {'Min':<10} {'Max':<10}")
+    change_data = [] ## <-- ADDED: Initialize list to store change data
+
+    print(f"\n{'Label':<15} {'Model':<12} {'Mean':<10} {'Std Dev':<10} {'Min':<10} {'Max':<10}")
     print("-" * 80)
     
     for label in all_labels:
@@ -220,6 +221,16 @@ def compare_models(base_model_path, unlearned_model_path, user_prompts, system_m
         improvement = unlearned_stats["mean"] - base_stats["mean"]
         improvement_pct = (improvement / base_stats["mean"] * 100) if base_stats["mean"] != 0 else 0.0
         
+        ## <-- ADDED START: Append the results for the current label to our list
+        change_data.append({
+            "label": label,
+            "base_mean": base_stats["mean"],
+            "unlearned_mean": unlearned_stats["mean"],
+            "mean_change": improvement,
+            "percent_change": improvement_pct
+        })
+        ## <-- ADDED END
+
         summary["per_label_stats"][label] = {
             "base": base_stats,
             "unlearned": unlearned_stats,
@@ -228,15 +239,15 @@ def compare_models(base_model_path, unlearned_model_path, user_prompts, system_m
         }
         
         # Print base stats
-        print(f"{label:<15} {'Base':<8} {base_stats['mean']:>9.4f} {base_stats['std']:>9.4f} "
+        print(f"{label:<15} {'Base':<12} {base_stats['mean']:>9.4f} {base_stats['std']:>9.4f} "
               f"{base_stats['min']:>9.4f} {base_stats['max']:>9.4f}")
         
         # Print unlearned stats
-        print(f"{label:<15} {'unlearned':<8} {unlearned_stats['mean']:>9.4f} {unlearned_stats['std']:>9.4f} "
+        print(f"{label:<15} {'Unlearned':<12} {unlearned_stats['mean']:>9.4f} {unlearned_stats['std']:>9.4f} "
               f"{unlearned_stats['min']:>9.4f} {unlearned_stats['max']:>9.4f}")
         
         # Print comparison
-        print(f"{'':<15} {'Δ':<8} {improvement:>+9.4f} ({improvement_pct:>+6.2f}%)")
+        print(f"{'':<15} {'Δ':<12} {improvement:>+9.4f} ({improvement_pct:>+6.2f}%)")
         print()
 
     # Highlight focus label
@@ -245,26 +256,44 @@ def compare_models(base_model_path, unlearned_model_path, user_prompts, system_m
         print(f"FOCUS LABEL: {focus_label.upper()}")
         print("="*80)
         focus_stats = summary["per_label_stats"][focus_label]
-        print(f"Base Model:  Mean={focus_stats['base']['mean']:.4f}, StdDev={focus_stats['base']['std']:.4f}")
-        print(f"unlearned Model: Mean={focus_stats['unlearned']['mean']:.4f}, StdDev={focus_stats['unlearned']['std']:.4f}")
-        print(f"Improvement: {focus_stats['improvement']:+.4f} ({focus_stats['improvement_percent']:+.2f}%)")
+        print(f"Base Model:    Mean={focus_stats['base']['mean']:.4f}, StdDev={focus_stats['base']['std']:.4f}")
+        print(f"Unlearned Model: Mean={focus_stats['unlearned']['mean']:.4f}, StdDev={focus_stats['unlearned']['std']:.4f}")
+        print(f"Improvement:   {focus_stats['improvement']:+.4f} ({focus_stats['improvement_percent']:+.2f}%)")
         
         # Determine winner
         if focus_stats['improvement'] > 0:
-            print(f"\n✓ unlearned model shows improvement on {focus_label}")
+            print(f"\n✓ Unlearned model shows improvement on {focus_label}")
         elif focus_stats['improvement'] < 0:
             print(f"\n✗ Base model performs better on {focus_label}")
         else:
             print(f"\n= Models perform equally on {focus_label}")
 
     # Save comprehensive summary
-    with open("results/comprehensive_statistics.json", "w") as f:
+    ul_path = unlearnt_model_path.rstrip("/").split("/")[-1]
+    print(ul_path)
+    # -> "sel_100000p0_damp_0p30000000000000004"
+
+    with open(f"eval_results/{ul_path}_comprehensive_statistics.json", "w") as f:
         json.dump(summary, f, indent=4)
+        
+    ## <-- ADDED START: Create DataFrame and save to CSV
+    change_df = pd.DataFrame(change_data)
+    change_df.to_csv(f"eval_results/{ul_path}_emotion_change_summary.csv", index=False)
+    ## <-- ADDED END
 
     print("\n" + "="*80)
-    print("Saved comprehensive statistics to results/comprehensive_statistics.json")
+    print(f"Saved comprehensive statistics to eval_results/{ul_path}_comprehensive_statistics.json")
+    print(f"Saved emotion change summary to eval_results/{ul_path}_emotion_change_summary.csv") ## <-- ADDED
     print("="*80)
 
+DATASET_PATHS = {
+    "honesty": "data/facts/facts_true_false.csv",
+    "anger": "data/emotions/anger_test.json",
+    "happiness": "data/emotions/happiness.json",
+    "sadness": "data/emotions/sadness.json",
+    "surprise": "data/emotions/surprise.json",
+    "disgust": "data/emotions/disgust.json"
+}
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="A simple script that demonstrates argparse.")
@@ -282,16 +311,18 @@ if __name__ == "__main__":
     else:
         print("No --config file provided. Using command-line args or defaults.")
     
+    concept = config_data["data_args"].get("concept","happiness")
 
     unlearnt_model_dir = config_data["model_args"].get("save_dir","save_directory")
     unlearnt_model_path = unlearnt_model_dir
     base_model_path = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
-    with open("../data/emotions/happiness.json", "r") as f:
+    with open(DATASET_PATHS[concept], "r") as f:
         user_prompts = json.load(f)
 
     # Configure number of samples to use (None = use all)
-    NUM_SAMPLES = 10  # Change this to desired number, or set to None for all samples
-
+    NUM_SAMPLES = None  # Change this to desired number, or set to None for all samples
+    print(unlearnt_model_path)
     # classes: anger, disgust, fear, joy, neutrality, sadness, and surprise.
-    compare_models(base_model_path, unlearnt_model_path, user_prompts, focus_label="anger", num_samples=NUM_SAMPLES)
+    compare_models(base_model_path, unlearnt_model_path, user_prompts, focus_label=concept, num_samples=NUM_SAMPLES)
+

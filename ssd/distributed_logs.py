@@ -62,12 +62,12 @@ def ftag(x: float) -> str:
 # This is required for multiprocessing to work correctly
 
 DATASET_PATHS = {
-    "honesty": "data/facts/facts_true_false.csv",
+    # "honesty": "data/facts/facts_true_false.csv",
     "anger": "data/emotions/anger_train.json",
-    "happiness": "data/emotions/happiness.json",
-    "sadness": "data/emotions/sadness.json",
-    "surprise": "data/emotions/surprise.json",
-    "disgust": "data/emotions/disgust.json"
+    "joy": "data/emotions/joy_train.json",
+    "sadness": "data/emotions/sadness_train.json",
+    "surprise": "data/emotions/surprise_train.json",
+    # "disgust": "data/emotions/disgust.json"
 }
 if __name__ == "__main__":
     multiprocessing.set_start_method('spawn', force=True) # Good practice for CUDA

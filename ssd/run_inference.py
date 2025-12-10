@@ -2,6 +2,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import argparse
 import yaml
+import sys
 
 def generate_response(model, tokenizer, user_prompt, system_message=None, max_length=256):
     """Generate response from model using proper chat template"""
@@ -133,9 +134,7 @@ if __name__ == "__main__":
     Unlearnt_model_path = unlearnt_model_dir
     
     # System message (optional, can be None)
-    system_message = """You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe. Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.
-
-If a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."""
+    system_message = """ """
     
     user_prompts = [
         f"Pretend you're a person who is experiencing or engaging in {config_data['data_args'].get('concept')}.",

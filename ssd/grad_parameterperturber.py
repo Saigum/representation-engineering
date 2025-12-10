@@ -13,6 +13,13 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers import pipeline
 from repe import repe_pipeline_registry
 from function_utils import iter_transformer_blocks, PairsTextDataset, emotion_function_dataset, make_emotion_dataloaders
+from train_val_datasets import (
+    AlpacaSupervisedDataset,
+    load_tqa_sentences,
+    load_arc_sentences,
+    get_logprobs_accuracy,
+)
+import time
 
 ###############################################################################
 ## REGISTERING REP_READER PIPELINE
@@ -77,6 +84,47 @@ def analyze_importance_tensors(retain_importances, forget_importances, param_nam
     print("       END: Importance Tensor Analysis       ")
     print("="*50 + "\n")
 
+def analyze_average_negative_gradients(neg_grad_signs, param_names_to_modify):
+    """
+    Analyzes and prints statistics of average negative gradients for specified parameters.
+    """
+    print("\n" + "="*50)
+    print("   START: Average Negative Gradient Analysis   ")
+    print("="*50)
+
+    # Sort for consistent output order
+    sorted_param_names = sorted(list(param_names_to_modify))
+
+    total_percent = 0
+    for name in sorted_param_names:
+        if name not in neg_grad_signs:
+            print(f"Skipping {name} as it's missing from the negative gradient signs dictionary.")
+            continue
+
+        neg_grad = neg_grad_signs[name].detach().to(torch.bfloat16)
+
+        mean_val = neg_grad.mean().item()
+        std_val = neg_grad.std().item()
+        min_val = neg_grad.min().item()
+        max_val = neg_grad.max().item()
+
+        print("Collecting Number of parameters with Negative Average Gradient Signs...")
+        num_negative = (neg_grad < 0).sum().item()
+        total_params = neg_grad.numel()
+        total_percent += (num_negative / total_params) 
+        print(f"  - {num_negative} out of {total_params} parameters have positive average gradient signs.")
+        print(f"  - Percentage: {(num_negative / total_params) * 100:.2f}%")
+        
+        print(f"\nParameter: {name}")
+        print(f"  - Shape: {list(neg_grad.shape)}")
+        print(f"  - Avg Negative Gradient | Mean: {mean_val:.4e}, Std: {std_val:.4e}, Min: {min_val:.4e}, Max: {max_val:.4e}")
+
+    total_percent /= len(sorted_param_names)
+    print("Percentage of parameters with Positive Average Gradient Signs across all tensors:", total_percent*100)
+    print("\n" + "="*50)
+    print("     END: Average Negative Gradient Analysis     ")
+    print("="*50 + "\n")
+    
 class ParamConfig(BaseModel):
     lower_bound: int = 1
     exponent: int = 1
@@ -322,6 +370,7 @@ class ParameterPerturber(torch.nn.Module):
                 min_locs = torch.where(update > self.lower_bound)
                 update[min_locs] = self.lower_bound
                 print(f"Shape of place going to be modified: {param_dict[name][locations].shape}, Shape of update: {update.shape}")
+                print(f"Number of ones in update: {(update==1).sum().item()}")
                 pre_params = param_dict[name].clone()
                 param_dict[name][locations] = param_dict[name][locations].mul(update)
                 ## calculating the mean squared difference between the old and new weights
@@ -339,7 +388,88 @@ class ParameterPerturber(torch.nn.Module):
         print("Average Relative MSE across all modified tensors:", sum(relative_mse.values())/len(relative_mse))
 
         # print(f"Went through {count} tensors.")
+    def contrast_weight_modification(self,
+                                     accum_steps: int = 4,
+                                     lorra_args: dict = None,
+                                     tokenizer = None,
+                                     ):
+        
+        train_dataset = AlpacaSupervisedDataset(
+        tokenizer=tokenizer, num_examples=10000, lorra_args=lorra_args
+        )
+        dataloader = DataLoader(train_dataset,batch_size=32,shuffle=False)
+        importances = self.__zero_params__()
+        grad_sign = self.__zero_params__()
+        if not importances:
+            print("Warning: Importance tensor is empty")
+            exit(1)
+            return importances
+        total_batches = len(dataloader)    
+        with tqdm(total=total_batches, desc="Calculating Importances") as pbar:
+            for batch_idx, batch in enumerate(dataloader):
+                input_ids = batch.get("input_ids")
+                attention_mask = inputs.get("attention_mask")
 
+                assert input_ids.shape[1] == 3
+
+                orig_input_ids = input_ids[:, 0]
+                pos_input_ids = input_ids[:, 1]
+                neg_input_ids = input_ids[:, 2]
+
+                orig_attention_mask = attention_mask[:, 0]
+                pos_attention_mask = attention_mask[:, 1]
+                neg_attention_mask = attention_mask[:, 2]
+
+                min_length = max_res_len
+                response_attention_mask = (
+                    orig_attention_mask[:, -min_length:]
+                    .repeat(len(target_layers), 1, 1)
+                    .unsqueeze(-1)
+                )
+
+                module = "past_key_values"  
+                orig_outputs = self.model(
+                    input_ids=orig_input_ids,
+                    attention_mask=orig_attention_mask,
+                    output_hidden_states=True,
+                )["hidden_states"]
+                orig_hidden = [
+                    orig_outputs[l][:, -min_length:].detach() for l in target_layers
+                ]
+                pos_outputs = self.model(
+                    input_ids=pos_input_ids,
+                    attention_mask=pos_attention_mask,
+                    output_hidden_states=True,
+                )["hidden_states"]
+                neg_outputs = self.model(
+                    input_ids=neg_input_ids,
+                    attention_mask=neg_attention_mask,
+                    output_hidden_states=True,
+                )["hidden_states"]
+                direction_hidden = [
+                    pos_outputs[l][:, -min_length:].detach()
+                    - neg_outputs[l][:, -min_length:].detach()
+                    # + beta * torch.tensor(pca_directions[l - len(pca_directions)], device=model.device, dtype=torch.float16) \
+                    for l in target_layers
+                ]
+                target_hidden = (
+                    torch.stack(
+                        [
+                            orig_hidden[i] + alpha * direction_hidden[i]
+                            for i in range(len(target_layers))
+                        ]
+                    )
+                    * response_attention_mask
+                )
+
+                del orig_outputs, pos_outputs, neg_outputs, orig_hidden, direction_hidden
+
+            self.model.train()
+            
+        
+
+                
+        
 
 def forget_retain_signal_tuning(
     model: torch.nn.Module,
@@ -402,13 +532,68 @@ def forget_retain_signal_tuning(
 
     print("Analyzing Importance Tensors ....")
     analyze_importance_tensors(retain_importances, forget_importances, pdr.param_names_to_modify)
+    
+    
 
     print("Modifying weights...")
     pdr.modify_weight(retain_importances, forget_importances, neg_forget_grad_sign)
     print("Weight modification complete.")
     return model
 
+def compute_perplexity(model,test_loader,device):
+    perplexity = 0.0
+    with tqdm(total=len(test_loader), desc="Evaluating Perplexity") as pbar:
+        for batch in test_loader:
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            with torch.no_grad():
+                with torch.no_grad():
+                    outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=input_ids)
+                    loss = outputs.loss
+                    ppl = torch.exp(loss)
+                    perplexity += ppl.item()
+            pbar.update(1)
+    perplexity /= len(test_loader)
+    return perplexity
 
+
+
+
+def finetune_model(
+    model,
+    train_loader: DataLoader,
+    test_loader: DataLoader,
+    device: str,
+    concept_vector: Optional[Tensor],
+    reading_vector: Optional[Tensor],
+    epochs: int = 3,
+    ):
+    
+    model.train()
+    optimizer = torch.optim.Adam(model.parameters(), lr=5e-5)
+    loss_fn = ConceptLoss(concept_vector, reading_vector)
+    with tqdm(total=epochs, desc="Fine-tuning Model") as pbar:
+        for epoch in range(epochs):
+            epoch_loss = 0.0
+            for batch in train_loader:
+                input_ids = batch['input_ids'].to(device)
+                attention_mask = batch['attention_mask'].to(device)
+                optimizer.zero_grad()
+                outputs = model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
+                hidden_states = outputs.hidden_states
+                # Collect activations from all layers
+                activations = [hidden_states[i+1] for i in range(model.config.num_hidden_layers)]
+                loss = loss_fn(activations)
+                loss.backward()
+                optimizer.step()
+                epoch_loss += loss.item()
+            avg_epoch_loss = epoch_loss / len(train_loader)
+            print(f"Epoch {epoch+1}/{epochs}, Average Loss: {avg_epoch_loss:.4f}")
+            pbar.update(1)
+    
+    perplexity = compute_perplexity(model,test_loader,device)
+    print("Fine-tuning complete. Test Perplexity:", perplexity)
+    return model
 ################################################################################
 # 2) The SSSD class -> Signal-based Selective Synaptic Dampening
 ################################################################################
@@ -434,7 +619,6 @@ class SSSD():
         self.model.to(self.device)
 
     def unlearn(self, train_loader, test_loader, concept_vector, reading_vector, eval_loaders=None):
-        import time
         time_start = time.process_time()
         self.best_model = forget_retain_signal_tuning(
             self.model,
@@ -480,7 +664,7 @@ def parse_args():
     parser.add_argument("--model_name", type=str, default=model_args.get('model_name', 'gpt2'), help="Model name or path.")
     parser.add_argument("--save_path", type=str, default=model_args.get('save_path', 'unlearned_model.pth'), help="Path to save the unlearned model.")
     parser.add_argument("--save_dir",type=str,default=model_args.get('save_dir','save_directory') ,help="HuggingFaceSave")
-
+    parser.add_argument("--finetune_save_dir",type=str,default=model_args.get('finetune_save_dir','finetuned_model') ,help="HuggingFaceSave for finetuned model")
     # Data args
     data_args = config_data.get('data_args', {})
     parser.add_argument("--data_path", type=str, default=data_args.get('data_path', './data/'), help="Path to the honesty dataset.")
@@ -647,6 +831,15 @@ def main():
     
     ## reloading model ??? 
     model = AutoModelForCausalLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16, trust_remote_code=True).to(device)
+    ### evaluating perplexity before unlearning
+    print("Evaluating model perplexity before unlearning...")
+    ppl = compute_perplexity(model,test_loader,device)
+    print(f"Perplexity before unlearning: {ppl}")
+    # ppl, acc = get_logprobs_accuracy(model, test_loader, device)
+    ### evaluating perplexity in a forloop on the test_loader
+
+                # print(f"Perplexity: {ppl.item()}")
+    
     unlearner_instance = SSSD(
         optimizer=torch.optim.Adam(model.parameters(), lr=1e-4),
         model=model,
@@ -669,15 +862,40 @@ def main():
 
     print("Unlearning completed.")  
 
+    ### evaluating perplexity after unlearning
+    print("Evaluating model perplexity after unlearning...")
+    ppl = compute_perplexity(unlearned_model,test_loader,device)
+    print(f"Perplexity after unlearning: {ppl}")
+    
+    
+    
     # Save the model    
-    print(f"Saving unlearned model to: {args.save_path}")
-    torch.save(unlearned_model.state_dict(), args.save_path)
+    # print(f"Saving unlearned model to: {args.save_path}")
+    # torch.save(unlearned_model.state_dict(), args.save_path)
     
     ## huggingface save to ./save_directory
     print("HuggingFace save")   
     os.makedirs(args.save_dir,exist_ok=True)
     unlearned_model.save_pretrained(args.save_dir)
-
+    ##### comparing wrt a finetuned baseline done solely on the ConceptLoss class
+    ## removing old model from gpu
+    del model
+    del unlearned_model
+    torch.cuda.empty_cache()
+    print("Starting fine-tuning baseline model solely on ConceptLoss...")
+    baseline_model = AutoModelForCausalLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16, trust_remote_code=True).to(device)
+    finetune_model = finetune_model(
+        model=baseline_model,
+        train_loader=train_loader,
+        test_loader=test_loader,
+        device=device,
+        concept_vector=concept_vector,
+        reading_vector=None,
+        epochs=3
+    )
+    print("Fine-tuning completed.")
+    print("Saving fine-tuned model...")
+    os.makedirs(args.finetune_save_dir,exist_ok=True)
     print("Model saved.")
 
 
