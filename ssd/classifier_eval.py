@@ -301,7 +301,7 @@ if __name__ == "__main__":
         user_prompts = json.load(f)
 
     # Configure number of samples to use (None = use all)
-    NUM_SAMPLES = 10  # Change this to desired number, or set to None for all samples
+    NUM_SAMPLES = None  # Change this to desired number, or set to None for all samples
 
     # classes: anger, disgust, fear, joy, neutrality, sadness, and surprise.
     compare_models(base_model_path, unlearnt_model_path, user_prompts, focus_label=concept, num_samples=NUM_SAMPLES)
