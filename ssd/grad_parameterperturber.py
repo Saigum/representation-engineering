@@ -540,6 +540,7 @@ def forget_retain_signal_tuning(
     print("Weight modification complete.")
     return model
 
+import math
 def compute_perplexity(model, test_loader, device):
     total_nll = 0.0
     total_tokens = 0
@@ -560,7 +561,7 @@ def compute_perplexity(model, test_loader, device):
             
             pbar.update(1)
 
-    return torch.exp(total_nll / total_tokens)
+    return math.exp(total_nll / total_tokens)
 
 
 
