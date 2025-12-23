@@ -546,12 +546,19 @@ def compute_perplexity(model,test_loader,device):
         for batch in test_loader:
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
+            pos_input_ids = input_ids[:,0]
+            neg_input_ids = input_ids[:,1]
+            pos_attention_mask = attention_mask[:,0]
+            neg_attention_mask = attention_mask[:,1]
+        
             with torch.no_grad():
-                with torch.no_grad():
-                    outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=input_ids)
-                    loss = outputs.loss
-                    ppl = torch.exp(loss)
-                    perplexity += ppl.item()
+                outputs = model(input_ids=pos_input_ids, attention_mask=pos_attention_mask, labels=input_ids)
+                loss = outputs.loss
+                ppl = torch.exp(loss)
+                perplexity += ppl.item()
+            
+            ## computing for the negative inputs as well
+            # 
             pbar.update(1)
     perplexity /= len(test_loader)
     return perplexity
