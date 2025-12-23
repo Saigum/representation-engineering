@@ -540,29 +540,27 @@ def forget_retain_signal_tuning(
     print("Weight modification complete.")
     return model
 
-def compute_perplexity(model,test_loader,device):
-    perplexity = 0.0
+def compute_perplexity(model, test_loader, device):
+    total_nll = 0.0
+    total_tokens = 0
+    
+    model.eval()
+    
     with tqdm(total=len(test_loader), desc="Evaluating Perplexity") as pbar:
         for batch in test_loader:
-            input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
-            pos_input_ids = input_ids[:,0]
-            neg_input_ids = input_ids[:,1]
-            pos_attention_mask = attention_mask[:,0]
-            neg_attention_mask = attention_mask[:,1]
-        
-            with torch.no_grad():
-                outputs = model(input_ids=pos_input_ids, attention_mask=pos_attention_mask, labels=input_ids)
-                loss = outputs.loss
-                ppl = torch.exp(loss)
-                perplexity += ppl.item()
+            input_ids = batch['input_ids'][:, 0].to(device)
+            attention_mask = batch['attention_mask'][:, 0].to(device)
             
-            ## computing for the negative inputs as well
-            # 
+            with torch.no_grad():
+                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=input_ids)
+                num_valid_tokens = attention_mask.sum().item()
+                batch_nll = outputs.loss.item() * num_valid_tokens
+                total_nll += batch_nll
+                total_tokens += num_valid_tokens
+            
             pbar.update(1)
-    perplexity /= len(test_loader)
-    return perplexity
 
+    return torch.exp(total_nll / total_tokens)
 
 
 
