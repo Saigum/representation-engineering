@@ -582,8 +582,8 @@ def finetune_model(
         for epoch in range(epochs):
             epoch_loss = 0.0
             for batch in train_loader:
-                input_ids = batch['input_ids'].to(device)
-                attention_mask = batch['attention_mask'].to(device)
+                input_ids = batch['input_ids'][:,0].to(device)
+                attention_mask = batch['attention_mask'][:,0].to(device)
                 optimizer.zero_grad()
                 outputs = model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
                 hidden_states = outputs.hidden_states
@@ -896,21 +896,21 @@ def main():
     del model
     del unlearned_model
     torch.cuda.empty_cache()
-    print("Starting fine-tuning baseline model solely on ConceptLoss...")
-    baseline_model = AutoModelForCausalLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16, trust_remote_code=True).to(device)
-    finetune_model = finetune_model(
-        model=baseline_model,
-        train_loader=train_loader,
-        test_loader=test_loader,
-        device=device,
-        concept_vector=concept_vector,
-        reading_vector=None,
-        epochs=3
-    )
-    print("Fine-tuning completed.")
-    print("Saving fine-tuned model...")
-    os.makedirs(args.finetune_save_dir,exist_ok=True)
-    print("Model saved.")
+    # print("Starting fine-tuning baseline model solely on ConceptLoss...")
+    # baseline_model = AutoModelForCausalLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16, trust_remote_code=True).to(device)
+    # finetuned_model = finetune_model(
+    #     model=baseline_model,
+    #     train_loader=train_loader,
+    #     test_loader=test_loader,
+    #     device=device,
+    #     concept_vector=concept_vector,
+    #     reading_vector=None,
+    #     epochs=3
+    # )
+    # print("Fine-tuning completed.")
+    # print("Saving fine-tuned model...")
+    # os.makedirs(args.finetune_save_dir,exist_ok=True)
+    # print("Model saved.")
 
 
 if __name__ == "__main__":
