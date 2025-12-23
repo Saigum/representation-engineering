@@ -732,7 +732,7 @@ def main():
     
     ## path is anger-train.json for train, and for test the path is anger_test, i want a generic replacement for that
     test_path = args.data_path.replace("train","test")
-    test_loader = make_emotion_dataloaders(data_path=test_path,
+    test_loader,_ = make_emotion_dataloaders(data_path=test_path,
                                             tokenizer=tokenizer,user_tag="USER:",
                                             assistant_tag="ASSISTANT:",
                                             emotion=args.concept,
