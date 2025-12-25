@@ -84,8 +84,23 @@ def generate_response(model, tokenizer, user_prompts, system_message=None, max_l
 
     return responses
 
+import math
+def decimal2string(value:float)-> str:
+    decimal_str = value % 1
+    number  = math.floor(value)
+    stringoutput = f"{number}_p_{decimal_str:.4f}"
+    return stringoutput
+    
 
-def compare_models(base_model_path, unlearned_model_path, user_prompts, system_message=None, focus_label="joy", num_samples=None):
+def compare_models(
+        base_model_path,
+        unlearned_model_path,
+        user_prompts,
+        system_message=None,
+        focus_label="joy",
+        num_samples=None,
+        param_config={}
+    ):
     """Compare base model and unlearned model using label-wise sentiment classifier"""
 
     # Limit samples if specified
@@ -138,7 +153,7 @@ def compare_models(base_model_path, unlearned_model_path, user_prompts, system_m
         base_pred = classifier(base_response)  # list of dicts [{label, score}, ...]
         unlearned_pred = classifier(unlearned_response)
 
-        for i, (prompt_text, base_resp, unlearned_resp, b_pred, u_pred) in enumerate(
+        for j, (prompt_text, base_resp, unlearned_resp, b_pred, u_pred) in enumerate(
             zip(prompts, base_response, unlearned_response, base_pred, unlearned_pred)):  
 
             # Store per-label scores
@@ -149,14 +164,14 @@ def compare_models(base_model_path, unlearned_model_path, user_prompts, system_m
 
             # Save detailed outputs
             base_outputs.append({
-                "prompt_id": i,
+                "prompt_id": j,
                 "prompt": prompt_text,
                 "response": base_resp,
                 "scores": {entry["label"]: entry["score"] for entry in b_pred}
             })
             
             unlearned_outputs.append({
-                "prompt_id": i,
+                "prompt_id": j,
                 "prompt": prompt_text,
                 "response": unlearned_resp,
                 "scores": {entry["label"]: entry["score"] for entry in u_pred}
@@ -258,10 +273,26 @@ def compare_models(base_model_path, unlearned_model_path, user_prompts, system_m
         else:
             print(f"\n= Models perform equally on {focus_label}")
 
-    # Save comprehensive summary
-    with open("results/comprehensive_statistics.json", "w") as f:
-        json.dump(summary, f, indent=4)
+    # Save comprehensive summary, append to results directory
 
+    ## adding the param_config to the summary
+    summary["model_hyperparameters"] = param_config
+    ## comprehensive statistics is a json list of dictionaries
+    os.makedirs("results", exist_ok=True)
+    print("Writing the summary and results to a json specific to the paramconfig with a naming scheme")
+
+    ## param_config will have a key dampening_constant and selection_weighting
+    ## making a json name to write results to based on that
+    selection_weighting = param_config.get("selection_weighting", 0.1)
+    dampening_constant = param_config.get("dampening_constant", 0.1)
+    
+    results_fname = f"results/sel{decimal2string(selection_weighting)}_damp{decimal2string(dampening_constant)}.json"
+    
+    # Use 'w' instead of '+a' because appending to a JSON file makes it invalid 
+    # unless you are doing complex list-patching.
+    with open(results_fname, "w") as jsonfp:
+        json.dump(summary, jsonfp, indent=4)
+        
     print("\n" + "="*80)
     print("Saved comprehensive statistics to results/comprehensive_statistics.json")
     print("="*80)
@@ -291,7 +322,11 @@ if __name__ == "__main__":
     else:
         print("No --config file provided. Using command-line args or defaults.")
     
+
     concept = config_data["data_args"].get("concept","happiness")
+
+    # get model hyperparameters to put into the dictionary 
+    hyperparameters = config_data["model_args"].get("param_config",{}) 
 
     unlearnt_model_dir = config_data["model_args"].get("save_dir","save_directory")
     unlearnt_model_path = unlearnt_model_dir
@@ -304,4 +339,5 @@ if __name__ == "__main__":
     NUM_SAMPLES = None  # Change this to desired number, or set to None for all samples
 
     # classes: anger, disgust, fear, joy, neutrality, sadness, and surprise.
-    compare_models(base_model_path, unlearnt_model_path, user_prompts, focus_label=concept, num_samples=NUM_SAMPLES)
+    compare_models(base_model_path, unlearnt_model_path, user_prompts, focus_label=concept, num_samples=NUM_SAMPLES,
+                   param_config=hyperparameters)
