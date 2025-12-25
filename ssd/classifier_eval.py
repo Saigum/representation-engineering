@@ -85,7 +85,15 @@ def generate_response(model, tokenizer, user_prompts, system_message=None, max_l
     return responses
 
 
-def compare_models(base_model_path, unlearned_model_path, user_prompts, system_message=None, focus_label="joy", num_samples=None):
+def compare_models(
+        base_model_path,
+        unlearned_model_path,
+        user_prompts,
+        system_message=None,
+        focus_label="joy",
+        num_samples=None,
+        param_config={}
+    ):
     """Compare base model and unlearned model using label-wise sentiment classifier"""
 
     # Limit samples if specified
@@ -258,9 +266,21 @@ def compare_models(base_model_path, unlearned_model_path, user_prompts, system_m
         else:
             print(f"\n= Models perform equally on {focus_label}")
 
-    # Save comprehensive summary
-    with open("results/comprehensive_statistics.json", "w") as f:
-        json.dump(summary, f, indent=4)
+    # Save comprehensive summary, append to results directory
+
+    ## adding the param_config to the summary
+    summary["model_hyperparameters"] = param_config
+    ## comprehensive statistics is a json list of dictionaries
+    os.makedirs("results", exist_ok=True)
+    if not os.path.exists("results/comprehensive_statistics.json"):
+        with open("results/comprehensive_statistics.json", "w") as f:
+            json.dump([], f, indent=4)
+    else:
+        with open("results/comprehensive_statistics.json", "r") as f:
+            existing_data = json.load(f)
+        existing_data.append(summary)
+        with open("results/comprehensive_statistics.json", "w") as f:
+            json.dump(existing_data, f, indent=4)
 
     print("\n" + "="*80)
     print("Saved comprehensive statistics to results/comprehensive_statistics.json")
@@ -291,7 +311,11 @@ if __name__ == "__main__":
     else:
         print("No --config file provided. Using command-line args or defaults.")
     
+
     concept = config_data["data_args"].get("concept","happiness")
+
+    # get model hyperparameters to put into the dictionary 
+    hyperparameters = config_data["model_args"].get("param_config",{}) 
 
     unlearnt_model_dir = config_data["model_args"].get("save_dir","save_directory")
     unlearnt_model_path = unlearnt_model_dir
@@ -304,4 +328,5 @@ if __name__ == "__main__":
     NUM_SAMPLES = None  # Change this to desired number, or set to None for all samples
 
     # classes: anger, disgust, fear, joy, neutrality, sadness, and surprise.
-    compare_models(base_model_path, unlearnt_model_path, user_prompts, focus_label=concept, num_samples=NUM_SAMPLES)
+    compare_models(base_model_path, unlearnt_model_path, user_prompts, focus_label=concept, num_samples=NUM_SAMPLES,
+                   param_config=hyperparameters)
